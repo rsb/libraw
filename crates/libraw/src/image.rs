@@ -117,7 +117,9 @@ impl ImageBuffer {
         }
         // Cast to usize before arithmetic to avoid u32 overflow on very large
         // images, even though the constructor guarantees width * height fits.
-        Some(self.pixels[(y as usize) * (self.width as usize) + (x as usize)])
+        self.pixels
+            .get((y as usize) * (self.width as usize) + (x as usize))
+            .copied()
     }
 
     pub fn width(&self) -> u32 {
@@ -152,12 +154,14 @@ impl ImageBuffer {
             .context("ImageBuffer::from_rgb8 failed"));
         }
 
-        // chunks_exact(3) yields non-overlapping 3-byte windows. The "exact"
-        // variant would silently drop a remainder shorter than 3 bytes, but the
+        // as_chunks::<3>() yields non-overlapping 3-byte arrays and returns any
+        // remainder shorter than 3 bytes separately, where it is dropped. The
         // length check above guarantees the slice divides evenly — no leftovers.
         let pixels = data
-            .chunks_exact(3)
-            .map(|rgb| Pixel::from_srgb(rgb[0], rgb[1], rgb[2]))
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|&[r, g, b]| Pixel::from_srgb(r, g, b))
             .collect();
 
         Ok(Self {
@@ -201,11 +205,13 @@ impl ImageBuffer {
         // becomes 8-bit 0xAB. Slightly biased vs. proper rounding, but this is a
         // display path — the sub-LSB error is invisible on 8/10-bit monitors.
         let pixels = data
-            .chunks_exact(6)
-            .map(|rgb| {
-                let r = u16::from_ne_bytes([rgb[0], rgb[1]]);
-                let g = u16::from_ne_bytes([rgb[2], rgb[3]]);
-                let b = u16::from_ne_bytes([rgb[4], rgb[5]]);
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .map(|&[r0, r1, g0, g1, b0, b1]| {
+                let r = u16::from_ne_bytes([r0, r1]);
+                let g = u16::from_ne_bytes([g0, g1]);
+                let b = u16::from_ne_bytes([b0, b1]);
                 Pixel::from_srgb((r >> 8) as u8, (g >> 8) as u8, (b >> 8) as u8)
             })
             .collect();
