@@ -211,12 +211,12 @@ fn decode_jpeg_thumbnail(jpeg_data: &[u8]) -> Result<ImageBuffer, fail::Error> {
 // Error classification
 // ---------------------------------------------------------------------------
 
-/// TOCTOU heuristic for open_file failures. If LibRaw reports an I/O error
-/// but the file still exists on disk, the error is reclassified as Corrupt —
-/// the file is present but unreadable in a way that suggests damage rather
-/// than a missing-file problem. LibRaw reports a file too short to identify
-/// this way. The race condition (file deleted between LibRaw's open and our
-/// exists check) is accepted as best-effort.
+/// TOCTOU heuristic for open_file failures. `Processor::open_file` has
+/// already opened the file for reading, so if LibRaw then reports an I/O
+/// error and the file still exists, the error is reclassified as Corrupt:
+/// LibRaw reports a file too short to identify this way. The race condition
+/// (file deleted between LibRaw's open and our exists check) is accepted as
+/// best-effort.
 fn classify_open_file_error(err: ffi::Error, path_exists: bool) -> fail::Error {
     match err {
         ffi::Error::Call {

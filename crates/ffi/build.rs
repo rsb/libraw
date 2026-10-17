@@ -68,7 +68,7 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor/LibRaw-0.22.1");
 
     // Phase 3: generate Rust bindings from libraw.h.
-    // The allowlist restricts output to the ~12 functions and ~5 types that the
+    // The allowlist restricts output to the functions, types and constants that the
     // safe wrapper crate actually uses. use_core() avoids a std dependency in the
     // generated code. generate_comments(false) drops C doc comments that don't
     // translate well to Rust. derive_default(true) adds Default impls for FFI
@@ -93,6 +93,8 @@ fn main() {
         .allowlist_type("LibRaw_image_formats")
         .allowlist_type("libraw_output_params_t")
         .allowlist_type("LibRaw_errors")
+        .allowlist_type("LibRaw_progress")
+        .allowlist_var("LIBRAW_PROGRESS_THUMB_MASK")
         .use_core()
         .generate_comments(false)
         .derive_default(true)

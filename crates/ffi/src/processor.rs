@@ -61,11 +61,13 @@ pub struct MemImage {
 /// One LibRaw instance (`libraw_data_t`). Each method is one C API call that
 /// checks its return code. Calls go in LibRaw's order: `open_file`, then
 /// `unpack` or `unpack_thumb`, then the setters and `dcraw_process`, then
-/// `make_mem_image` or `make_mem_thumb`. An out-of-order call is LibRaw's to
-/// refuse, and comes back as an `Error`.
+/// `make_mem_image` or `make_mem_thumb`. An out-of-order call comes back as
+/// an `Error` with `ErrorCode::OutOfOrderCall`. LibRaw refuses most of these
+/// itself; `make_mem_image` is checked here, because LibRaw returns it
+/// unfilled.
 ///
-/// Not `Send`: LibRaw instances are not documented as safe to move between
-/// threads mid-decode.
+/// Neither `Send` nor `Sync`, because it holds a raw pointer. LibRaw allows
+/// one instance per thread, so `Send` could be added if a caller needs it.
 pub struct Processor {
     ptr: NonNull<raw::libraw_data_t>,
 }
@@ -82,14 +84,14 @@ impl Processor {
     /// Opens and identifies the file at `path`.
     pub fn open_file(&mut self, path: &Path) -> Result<(), Error> {
         let c_path = path_to_cstring(path)?;
-        std::fs::metadata(path).map_err(Error::Open)?;
+        std::fs::File::open(path).map_err(Error::Open)?;
         // SAFETY: self.ptr is a live instance; c_path is NUL-terminated and
-        // outlives the call, and LibRaw copies the name it keeps. The stat
-        // above keeps a missing path away from LibRaw's uninitialised-size
-        // read; a file deleted between that stat and LibRaw's own can still
-        // reach it. That read gives a wrong error code, not a memory access
-        // by us, and is a LibRaw bug this crate cannot close without patching
-        // the vendored source.
+        // outlives the call, and LibRaw copies the name it keeps. The open
+        // above keeps a missing or unreadable path away from LibRaw's
+        // uninitialised-size read; a file deleted between that open and
+        // LibRaw's stat can still reach it. That read gives a wrong error
+        // code, not a memory access by us, and is a LibRaw bug this crate
+        // cannot close without patching the vendored source.
         let rc = unsafe { raw::libraw_open_file(self.ptr.as_ptr(), c_path.as_ptr()) };
         check(rc, "libraw_open_file")
     }
@@ -141,8 +143,18 @@ impl Processor {
         check(rc, "libraw_dcraw_process")
     }
 
-    /// Copies out the processed image.
+    /// Copies out the processed image. Fails with `OutOfOrderCall` until
+    /// `dcraw_process` has run on the open file.
     pub fn make_mem_image(&mut self) -> Result<MemImage, Error> {
+        // LibRaw allocates the image, then ignores the out-of-order error
+        // from filling it, and returns uninitialised pixels. Its own check,
+        // made here first, keeps that buffer from being read.
+        if self.progress() < raw::LibRaw_progress_LIBRAW_PROGRESS_PRE_INTERPOLATE {
+            return Err(Error::call(
+                "libraw_dcraw_make_mem_image",
+                raw::LibRaw_errors_LIBRAW_OUT_OF_ORDER_CALL,
+            ));
+        }
         let mut errcode = 0;
         // SAFETY: self.ptr is a live instance and errcode a valid int.
         let ptr = unsafe { raw::libraw_dcraw_make_mem_image(self.ptr.as_ptr(), &mut errcode) };
@@ -155,6 +167,14 @@ impl Processor {
         // SAFETY: self.ptr is a live instance and errcode a valid int.
         let ptr = unsafe { raw::libraw_dcraw_make_mem_thumb(self.ptr.as_ptr(), &mut errcode) };
         take_mem_image(ptr, errcode, "libraw_dcraw_make_mem_thumb")
+    }
+
+    /// How far processing has gone, as LibRaw's `copy_mem_image` measures it.
+    fn progress(&self) -> u32 {
+        // SAFETY: self.ptr is a live instance, and `&self` rules out a
+        // concurrent `&mut` borrow from `params`.
+        let flags = unsafe { (*self.ptr.as_ptr()).progress_flags };
+        flags & raw::LIBRAW_PROGRESS_THUMB_MASK
     }
 
     fn params(&mut self) -> &mut raw::libraw_output_params_t {
@@ -190,7 +210,7 @@ fn take_mem_image(
     call: &'static str,
 ) -> Result<MemImage, Error> {
     let Some(ptr) = NonNull::new(ptr) else {
-        return Err(Error::call(call, errcode));
+        return Err(Error::call(call, libraw_code(errcode)));
     };
     let allocation = Allocation(ptr);
     let image = allocation.0.as_ptr();
@@ -216,6 +236,20 @@ fn take_mem_image(
         colors: header.colors,
         data,
     })
+}
+
+/// C's `ENOMEM`: 12 on Linux, macOS, the BSDs and the Windows CRT.
+const ENOMEM: i32 = 12;
+
+/// The `dcraw_make_mem_*` calls report a failed `malloc` as `ENOMEM`, an
+/// errno, where every other failure is a `LibRaw_errors` code. This puts it
+/// back in LibRaw's terms.
+fn libraw_code(errcode: i32) -> i32 {
+    if errcode == ENOMEM {
+        raw::LibRaw_errors_LIBRAW_UNSUFFICIENT_MEMORY
+    } else {
+        errcode
+    }
 }
 
 fn check(rc: i32, call: &'static str) -> Result<(), Error> {
@@ -253,6 +287,61 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(&err, Error::Open(e) if e.kind() == std::io::ErrorKind::NotFound),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn opening_an_unreadable_file_fails_before_libraw() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "rsb_libraw_ffi_unreadable_{}.cr2",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"raw bytes").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads any file, so there is nothing to test.
+        let readable = std::fs::File::open(&path).is_ok();
+        let result = Processor::new().unwrap().open_file(&path);
+        std::fs::remove_file(&path).ok();
+        if readable {
+            return;
+        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, Error::Open(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn make_mem_image_before_processing_is_out_of_order() {
+        let err = Processor::new().unwrap().make_mem_image().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Call {
+                    call: "libraw_dcraw_make_mem_image",
+                    code: ErrorCode::OutOfOrderCall,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_allocation_is_insufficient_memory() {
+        let err = take_mem_image(std::ptr::null_mut(), ENOMEM, "call").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Call {
+                    code: ErrorCode::InsufficientMemory,
+                    ..
+                }
+            ),
             "{err:?}"
         );
     }

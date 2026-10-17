@@ -61,10 +61,10 @@ pub enum Error {
     /// `libraw_init` returned null: LibRaw could not allocate its state.
     #[error("libraw_init returned null")]
     Init,
-    /// `stat` on the path failed, checked before LibRaw sees it. LibRaw's own
-    /// open reads an uninitialised size when its `stat` fails, and reports a
-    /// missing file as `TooBig` or `IoError` at random. Read permission is
-    /// not checked here; LibRaw reports that as `IoError`.
+    /// The path could not be opened for reading, checked before LibRaw sees
+    /// it: missing, unreadable, or a bad path. LibRaw's own open reads an
+    /// uninitialised size when its `stat` fails, and reports a missing file
+    /// as `TooBig` or `IoError` at random.
     #[error("cannot open file: {0}")]
     Open(std::io::Error),
     /// The path holds a null byte, so C cannot see all of it.
