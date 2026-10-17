@@ -19,26 +19,26 @@ use crate::image::ImageBuffer;
 /// no open/close lifecycle, which eliminates use-after-close and wrong-order
 /// bugs at the cost of opening the file once per method call.
 pub trait RawDecode: Send + Sync {
-  /// Full-resolution decode. The only required method — the minimum contract
-  /// for being a decoder. Takes a file path (not a reader) because LibRaw's
-  /// C API operates on paths, and it avoids forcing 25-80MB RAW files into
-  /// memory before decoding begins.
-  fn decode(&self, path: &Path) -> Result<ImageBuffer, Error>;
+    /// Full-resolution decode. The only required method — the minimum contract
+    /// for being a decoder. Takes a file path (not a reader) because LibRaw's
+    /// C API operates on paths, and it avoids forcing 25-80MB RAW files into
+    /// memory before decoding begins.
+    fn decode(&self, path: &Path) -> Result<ImageBuffer, Error>;
 
-  /// Extracts the camera-generated thumbnail. Default returns Unsupported so
-  /// implementors that lack thumbnail support don't need boilerplate. The
-  /// `let _ = path` suppresses the unused-variable warning without using
-  /// `_path` in the signature, which could mislead implementors into thinking
-  /// the parameter is not meant to be used in overrides.
-  fn decode_thumbnail(&self, path: &Path) -> Result<ImageBuffer, Error> {
-    let _ = path;
-    Err(Error::unsupported("thumbnail extraction not supported"))
-  }
+    /// Extracts the camera-generated thumbnail. Default returns Unsupported so
+    /// implementors that lack thumbnail support don't need boilerplate. The
+    /// `let _ = path` suppresses the unused-variable warning without using
+    /// `_path` in the signature, which could mislead implementors into thinking
+    /// the parameter is not meant to be used in overrides.
+    fn decode_thumbnail(&self, path: &Path) -> Result<ImageBuffer, Error> {
+        let _ = path;
+        Err(Error::unsupported("thumbnail extraction not supported"))
+    }
 
-  /// Half-resolution decode for fast previews. Same default-returns-Unsupported
-  /// pattern as decode_thumbnail.
-  fn decode_preview(&self, path: &Path) -> Result<ImageBuffer, Error> {
-    let _ = path;
-    Err(Error::unsupported("preview decode not supported"))
-  }
+    /// Half-resolution decode for fast previews. Same default-returns-Unsupported
+    /// pattern as decode_thumbnail.
+    fn decode_preview(&self, path: &Path) -> Result<ImageBuffer, Error> {
+        let _ = path;
+        Err(Error::unsupported("preview decode not supported"))
+    }
 }
