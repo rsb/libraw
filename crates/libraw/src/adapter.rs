@@ -3,7 +3,7 @@ use std::path::Path;
 use rsb_libraw_ffi::{self as ffi, ErrorCode, ImageFormat, MemImage, OutputBps, OutputColor};
 
 use crate::decode::RawDecode;
-use crate::error::{Cause, Error};
+use crate::error::Error;
 use crate::image::ImageBuffer;
 
 // ---------------------------------------------------------------------------
@@ -20,35 +20,39 @@ impl RawDecode for LibRawAdapter {
     /// Full-resolution decode: open → unpack → configure sRGB 16-bit →
     /// demosaic/process → extract image.
     fn decode(&self, path: &Path) -> Result<ImageBuffer, Error> {
-        let mut processor = ffi::Processor::new()?;
-        open_file(&mut processor, path)?;
-        processor.unpack()?;
-        configure_output_srgb16(&mut processor);
-        processor.dcraw_process()?;
-        rgb16_image(processor.make_mem_image()?)
+        process(path, false).map_err(|e| e.during("LibRawAdapter::decode"))
     }
 
     /// Extracts the camera-generated thumbnail. No processing step — thumbnails
     /// are pre-rendered by the camera firmware.
     fn decode_thumbnail(&self, path: &Path) -> Result<ImageBuffer, Error> {
-        let mut processor = ffi::Processor::new()?;
-        open_file(&mut processor, path)?;
-        processor.unpack_thumb()?;
-        thumbnail_image(processor.make_mem_thumb()?)
+        thumbnail(path).map_err(|e| e.during("LibRawAdapter::decode_thumbnail"))
     }
 
     /// Half-resolution decode for fast previews. Same pipeline as decode but
     /// with half_size enabled — each Bayer quad becomes one pixel instead of
     /// four, trading resolution for speed.
     fn decode_preview(&self, path: &Path) -> Result<ImageBuffer, Error> {
-        let mut processor = ffi::Processor::new()?;
-        open_file(&mut processor, path)?;
-        processor.unpack()?;
-        processor.set_half_size(true);
-        configure_output_srgb16(&mut processor);
-        processor.dcraw_process()?;
-        rgb16_image(processor.make_mem_image()?)
+        process(path, true).map_err(|e| e.during("LibRawAdapter::decode_preview"))
     }
+}
+
+/// The decode and preview pipeline; `half_size` is the only difference.
+fn process(path: &Path, half_size: bool) -> Result<ImageBuffer, Error> {
+    let mut processor = ffi::Processor::new()?;
+    open_file(&mut processor, path)?;
+    processor.unpack()?;
+    processor.set_half_size(half_size);
+    configure_output_srgb16(&mut processor);
+    processor.dcraw_process()?;
+    rgb16_image(processor.make_mem_image()?)
+}
+
+fn thumbnail(path: &Path) -> Result<ImageBuffer, Error> {
+    let mut processor = ffi::Processor::new()?;
+    open_file(&mut processor, path)?;
+    processor.unpack_thumb()?;
+    thumbnail_image(processor.make_mem_thumb()?)
 }
 
 // ---------------------------------------------------------------------------
@@ -66,11 +70,14 @@ fn configure_output_srgb16(processor: &mut ffi::Processor) {
     processor.set_output_bps(OutputBps::Sixteen);
 }
 
-/// Opens the file, applying the open-file classification below.
+/// Opens the file, applying the open-file classification below. The error's
+/// location is the caller's line.
+#[track_caller]
 fn open_file(processor: &mut ffi::Processor, path: &Path) -> Result<(), Error> {
-    processor
-        .open_file(path)
-        .map_err(|e| classify_open_file_error(e, path.exists()))
+    match processor.open_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) => Err(classify_open_file_error(e, path.exists())),
+    }
 }
 
 /// Converts a processed full image. Unlike thumbnails, the output format is
@@ -129,9 +136,7 @@ fn decode_jpeg_thumbnail(jpeg_data: &[u8]) -> Result<ImageBuffer, Error> {
     use jpeg_decoder::{Decoder, PixelFormat};
 
     let mut decoder = Decoder::new(jpeg_data);
-    let pixels = decoder
-        .decode()
-        .map_err(|e| Error::Corrupt(Cause::Jpeg(e)))?;
+    let pixels = decoder.decode().map_err(Error::corrupt)?;
 
     let info = decoder
         .info()
@@ -162,12 +167,13 @@ fn decode_jpeg_thumbnail(jpeg_data: &[u8]) -> Result<ImageBuffer, Error> {
 /// LibRaw reports a file too short to identify this way. The race condition
 /// (file deleted between LibRaw's open and our exists check) is accepted as
 /// best-effort.
+#[track_caller]
 fn classify_open_file_error(err: ffi::Error, path_exists: bool) -> Error {
     match err {
         ffi::Error::Call {
             code: ErrorCode::IoError,
             ..
-        } if path_exists => Error::Corrupt(Cause::LibRaw(err)),
+        } if path_exists => Error::corrupt(err),
         other => other.into(),
     }
 }
@@ -175,6 +181,7 @@ fn classify_open_file_error(err: ffi::Error, path_exists: bool) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Cause;
 
     fn call(code: ErrorCode) -> ffi::Error {
         ffi::Error::Call {
@@ -190,7 +197,10 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            Error::Corrupt(Cause::Jpeg(_))
+            Error::Corrupt {
+                cause: Cause::Jpeg(_),
+                ..
+            }
         ));
     }
 
@@ -200,25 +210,34 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            Error::Corrupt(Cause::Jpeg(_))
+            Error::Corrupt {
+                cause: Cause::Jpeg(_),
+                ..
+            }
         ));
     }
 
     #[test]
     fn classify_open_file_io_error_with_existing_path_returns_corrupt() {
         let err = classify_open_file_error(call(ErrorCode::IoError), true);
-        assert!(matches!(err, Error::Corrupt(Cause::LibRaw(_))));
+        assert!(matches!(
+            err,
+            Error::Corrupt {
+                cause: Cause::LibRaw(_),
+                ..
+            }
+        ));
     }
 
     #[test]
     fn classify_open_file_io_error_with_missing_path_returns_io() {
         let err = classify_open_file_error(call(ErrorCode::IoError), false);
-        assert!(matches!(err, Error::Io(_)));
+        assert!(matches!(err, Error::Io { .. }));
     }
 
     #[test]
     fn classify_open_file_non_io_error_ignores_path_exists() {
         let err = classify_open_file_error(call(ErrorCode::FileUnsupported), true);
-        assert!(matches!(err, Error::Unsupported(_)));
+        assert!(matches!(err, Error::Unsupported { .. }));
     }
 }

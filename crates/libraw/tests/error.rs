@@ -13,19 +13,28 @@ fn call(code: ErrorCode) -> LibRawError {
 #[test]
 fn io_failures_are_io() {
     let open = LibRawError::Open(std::io::Error::from(std::io::ErrorKind::NotFound));
-    assert!(matches!(Error::from(open), Error::Io(_)));
-    assert!(matches!(Error::from(LibRawError::PathNul), Error::Io(_)));
+    assert!(matches!(Error::from(open), Error::Io { .. }));
+    assert!(matches!(
+        Error::from(LibRawError::PathNul),
+        Error::Io { .. }
+    ));
     for code in [ErrorCode::IoError, ErrorCode::InputClosed] {
-        assert!(matches!(Error::from(call(code)), Error::Io(_)), "{code:?}");
+        assert!(
+            matches!(Error::from(call(code)), Error::Io { .. }),
+            "{code:?}"
+        );
     }
 }
 
 #[test]
 fn memory_failures_are_resource() {
-    assert!(matches!(Error::from(LibRawError::Init), Error::Resource(_)));
+    assert!(matches!(
+        Error::from(LibRawError::Init),
+        Error::Resource { .. }
+    ));
     for code in [ErrorCode::InsufficientMemory, ErrorCode::MempoolOverflow] {
         assert!(
-            matches!(Error::from(call(code)), Error::Resource(_)),
+            matches!(Error::from(call(code)), Error::Resource { .. }),
             "{code:?}"
         );
     }
@@ -43,7 +52,10 @@ fn unhandled_formats_are_unsupported() {
         assert!(
             matches!(
                 Error::from(call(code)),
-                Error::Unsupported(Cause::LibRaw(_))
+                Error::Unsupported {
+                    cause: Cause::LibRaw(_),
+                    ..
+                }
             ),
             "{code:?}"
         );
@@ -63,43 +75,61 @@ fn other_codes_are_corrupt() {
         ErrorCode::Other(999999),
     ] {
         assert!(
-            matches!(Error::from(call(code)), Error::Corrupt(Cause::LibRaw(_))),
+            matches!(
+                Error::from(call(code)),
+                Error::Corrupt {
+                    cause: Cause::LibRaw(_),
+                    ..
+                }
+            ),
             "{code:?}"
         );
     }
 }
 
-/// Each level's `Display`, joined the way a caller walking `source()` would.
-fn chain(err: &Error) -> Vec<String> {
-    let mut texts = vec![err.to_string()];
-    let mut source = err.source();
-    while let Some(s) = source {
-        texts.push(s.to_string());
-        source = s.source();
-    }
-    texts
-}
-
 #[test]
-fn the_chain_reaches_libraw_once() {
-    for err in [
-        Error::from(call(ErrorCode::IoError)),
-        Error::from(call(ErrorCode::InsufficientMemory)),
-        Error::from(call(ErrorCode::FileUnsupported)),
-        Error::from(call(ErrorCode::DataError)),
-    ] {
-        let texts = chain(&err);
-        assert_eq!(texts.len(), 2, "{texts:?}");
-        assert!(!texts[0].contains("libraw text"), "{texts:?}");
-        assert_eq!(texts[1], "libraw_test failed: libraw text");
-    }
-}
-
-#[test]
-fn the_chain_reaches_a_check() {
-    let err = Error::Corrupt(Cause::Check("width * height overflows usize".into()));
+fn the_message_reads_operation_cause_category() {
+    let err = Error::from(call(ErrorCode::DataError)).during("LibRawAdapter::decode");
     assert_eq!(
-        chain(&err),
-        ["corrupt data", "width * height overflows usize"]
+        err.to_string(),
+        "LibRawAdapter::decode: libraw_test failed: libraw text: corrupt data"
     );
+}
+
+#[test]
+fn each_category_ends_the_message() {
+    for (code, category) in [
+        (ErrorCode::IoError, "i/o failure"),
+        (ErrorCode::InsufficientMemory, "resource exhaustion"),
+        (ErrorCode::FileUnsupported, "unsupported format"),
+        (ErrorCode::DataError, "corrupt data"),
+    ] {
+        assert_eq!(
+            Error::from(call(code)).to_string(),
+            format!("libraw_test failed: libraw text: {category}")
+        );
+    }
+}
+
+#[test]
+fn a_check_error_without_an_operation_is_message_then_category() {
+    let err = Error::corrupt("width * height overflows usize");
+    assert_eq!(
+        err.to_string(),
+        "width * height overflows usize: corrupt data"
+    );
+}
+
+/// A reporter that walks `source()` must not print the cause twice.
+#[test]
+fn the_message_is_not_repeated_by_source() {
+    assert!(Error::from(call(ErrorCode::DataError)).source().is_none());
+}
+
+#[test]
+fn the_location_is_where_the_error_was_raised() {
+    let line = line!() + 1;
+    let err = Error::from(call(ErrorCode::DataError));
+    assert_eq!(err.location().file(), file!());
+    assert_eq!(err.location().line(), line);
 }

@@ -103,12 +103,11 @@ display(&full);
 
 ### Error handling
 
-`Error` has one variant per category a caller acts on. Its `Display`
-names the category; `source()` holds what LibRaw, the JPEG decoder or
-this crate found:
+`Error` has one variant per category a caller acts on. Its `Display` is
+one line: the operation, the cause, then the category.
+`e.location()` is the line in this crate that raised it:
 
 ```rust
-use std::error::Error as _;
 use rsb_libraw::{Error, LibRawAdapter, RawDecode};
 
 let adapter = LibRawAdapter;
@@ -116,20 +115,14 @@ let adapter = LibRawAdapter;
 match adapter.decode(path) {
   Ok(image) => process(image),
   Err(e) => {
-    match &e {
-      Error::Io(_)          => eprintln!("file not found or bad path"),
-      Error::Unsupported(_) => eprintln!("camera/format not handled"),
-      Error::Corrupt(_)     => eprintln!("file data is malformed"),
-      Error::Resource(_)    => eprintln!("out of memory"),
+    // LibRawAdapter::decode: libraw_unpack failed: <libraw text>: corrupt data
+    eprintln!("{e} (at {})", e.location());
+    match e {
+      Error::Io { .. }          => { /* check the path */ }
+      Error::Unsupported { .. } => { /* skip the file */ }
+      Error::Corrupt { .. }     => { /* reject the file */ }
+      Error::Resource { .. }    => { /* back off or abort */ }
     }
-    // "corrupt data: libraw_unpack failed: ..."
-    let mut text = e.to_string();
-    let mut source = e.source();
-    while let Some(s) = source {
-      text = format!("{text}: {s}");
-      source = s.source();
-    }
-    eprintln!("{text}");
   }
 }
 ```
@@ -186,8 +179,9 @@ let image = import_raw(&*decoder, Path::new("photo.arw"))?;
 | `Corrupt` | Data present but malformed | Reject file, report to user |
 | `Resource` | System resource exhaustion (OOM) | Back off or abort |
 
-`Io` and `Resource` hold the `LibRawError` from `rsb-libraw-ffi`.
-`Unsupported` and `Corrupt` hold a `Cause`: `LibRaw`, `Jpeg` for the
+Each variant has `op` (the public method that failed), `cause` and
+`location`. In `Io` and `Resource` the `cause` is the `LibRawError` from
+`rsb-libraw-ffi`; in `Unsupported` and `Corrupt` it is a `Cause`: `LibRaw`, `Jpeg` for the
 embedded thumbnail, or `Check` for a check in this crate. `rsb_libraw::error`
 re-exports `LibRawError` and `ErrorCode`, so a caller can name them without
 depending on `rsb-libraw-ffi`. The rule is `engineering/errors.md`.
