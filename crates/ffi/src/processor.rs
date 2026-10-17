@@ -42,9 +42,12 @@ impl ImageFormat {
     }
 }
 
-/// A processed image or thumbnail copied out of LibRaw's memory. For a
-/// `Bitmap`, `data` holds `width * height * colors` samples of `bits` each,
-/// row-major; for the compressed formats it holds the encoded stream.
+/// A processed image or thumbnail copied out of LibRaw's memory, as LibRaw
+/// describes it. For a `Bitmap` from `make_mem_image`, `data` holds
+/// `width * height * colors` samples of `bits` each, row-major. A bitmap
+/// thumbnail holds whatever the camera stored, so check `data` against the
+/// fields before trusting them. For the compressed formats `data` is the
+/// encoded stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemImage {
     pub format: ImageFormat,
@@ -81,7 +84,12 @@ impl Processor {
         let c_path = path_to_cstring(path)?;
         std::fs::metadata(path).map_err(Error::Open)?;
         // SAFETY: self.ptr is a live instance; c_path is NUL-terminated and
-        // outlives the call, and LibRaw copies the name it keeps.
+        // outlives the call, and LibRaw copies the name it keeps. The stat
+        // above keeps a missing path away from LibRaw's uninitialised-size
+        // read; a file deleted between that stat and LibRaw's own can still
+        // reach it. That read gives a wrong error code, not a memory access
+        // by us, and is a LibRaw bug this crate cannot close without patching
+        // the vendored source.
         let rc = unsafe { raw::libraw_open_file(self.ptr.as_ptr(), c_path.as_ptr()) };
         check(rc, "libraw_open_file")
     }
@@ -241,7 +249,7 @@ mod tests {
     fn opening_a_missing_file_fails_before_libraw() {
         let mut processor = Processor::new().unwrap();
         let err = processor
-            .open_file(Path::new("/tmp/does_not_exist_9f8a7b.cr2"))
+            .open_file(&std::env::temp_dir().join("does_not_exist_9f8a7b.cr2"))
             .unwrap_err();
         assert!(
             matches!(&err, Error::Open(e) if e.kind() == std::io::ErrorKind::NotFound),
@@ -251,7 +259,8 @@ mod tests {
 
     #[test]
     fn libraw_reports_a_short_garbage_file_as_an_io_error() {
-        let path = std::env::temp_dir().join("rsb_libraw_ffi_not_raw.cr2");
+        let path =
+            std::env::temp_dir().join(format!("rsb_libraw_ffi_not_raw_{}.cr2", std::process::id()));
         std::fs::write(&path, b"this is not a raw file at all").unwrap();
         let err = Processor::new().unwrap().open_file(&path).unwrap_err();
         std::fs::remove_file(&path).ok();
