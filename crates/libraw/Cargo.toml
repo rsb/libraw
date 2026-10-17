@@ -8,15 +8,5 @@ publish.workspace = true
 rsb-libraw-ffi = { workspace = true }
 jpeg-decoder = { version = "0.3", default-features = false }
 
-
-# The workspace lints without `unsafe_code`: this crate is part of the FFI
-# boundary. Keep in step with the root Cargo.toml.
-[lints.rust]
-unused_must_use = "deny"
-
-[lints.clippy]
-unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
-indexing_slicing = "deny"
-let_underscore_must_use = "deny"
+[lints]
+workspace = true
