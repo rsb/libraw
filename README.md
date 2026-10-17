@@ -25,7 +25,8 @@ Two crates, one boundary:
 │  pub mod error   — Kind, Error, ResultExt           │
 │  pub mod image   — Pixel, ImageBuffer               │
 │  pub mod decode  — RawDecode trait                  │
-│  mod adapter     — LibRawProcessor, LibRawAdapter   │
+│  mod adapter     — LibRawAdapter                    │
+│  forbids unsafe_code through the workspace lints    │
 └─────────────────────┬───────────────────────────────┘
                       │ depends on
 ┌─────────────────────▼───────────────────────────────┐
@@ -33,7 +34,11 @@ Two crates, one boundary:
 │                                                     │
 │  build.rs        — cc compiles vendor C++ source    │
 │                  — bindgen generates FFI bindings    │
-│  src/lib.rs      — re-exports generated bindings    │
+│  src/processor.rs — Processor, MemImage: the safe   │
+│                    API; every `unsafe` block lives  │
+│                    in this crate                    │
+│  src/error.rs    — Error, ErrorCode (thiserror)     │
+│  src/lib.rs      — keeps generated bindings private │
 │  vendor/         — LibRaw 0.22.1 source tree        │
 └─────────────────────────────────────────────────────┘
 ```

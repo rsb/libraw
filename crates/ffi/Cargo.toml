@@ -4,6 +4,9 @@ version = "0.0.1"
 edition.workspace = true
 publish.workspace = true
 
+[dependencies]
+thiserror = { workspace = true }
+
 [build-dependencies]
 bindgen = "0.71"
 cc = "1"
@@ -11,8 +14,9 @@ cc = "1"
 [lib]
 path = "src/lib.rs"
 
-# The workspace lints without `unsafe_code`: this crate is part of the FFI
-# boundary. Keep in step with the root Cargo.toml.
+# The workspace lints without `unsafe_code`: this crate holds every `unsafe`
+# block, and each needs a safety comment. Keep in step with the root
+# Cargo.toml.
 [lints.rust]
 unused_must_use = "deny"
 
@@ -22,3 +26,4 @@ expect_used = "deny"
 panic = "deny"
 indexing_slicing = "deny"
 let_underscore_must_use = "deny"
+undocumented_unsafe_blocks = "deny"
