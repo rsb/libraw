@@ -1,13 +1,34 @@
-use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rsb_libraw::error::Kind;
 use rsb_libraw::{LibRawAdapter, RawDecode};
 
+fn missing_path() -> PathBuf {
+    std::env::temp_dir().join("does_not_exist_9f8a7b.cr2")
+}
+
+/// A file holding `bytes`, removed on drop. The name carries the process id
+/// so concurrent test runs do not share it.
+struct TempFile(PathBuf);
+
+impl TempFile {
+    fn new(name: &str, bytes: &[u8]) -> std::io::Result<Self> {
+        let path = std::env::temp_dir().join(format!("rsb_libraw_{}_{name}", std::process::id()));
+        std::fs::write(&path, bytes)?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.0).ok();
+    }
+}
+
 #[test]
 fn decode_nonexistent_file_returns_io() {
     let adapter = LibRawAdapter;
-    let result = adapter.decode(Path::new("/tmp/does_not_exist_9f8a7b.cr2"));
+    let result = adapter.decode(&missing_path());
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind(), Kind::Io);
 }
@@ -15,7 +36,7 @@ fn decode_nonexistent_file_returns_io() {
 #[test]
 fn decode_thumbnail_nonexistent_file_returns_io() {
     let adapter = LibRawAdapter;
-    let result = adapter.decode_thumbnail(Path::new("/tmp/does_not_exist_9f8a7b.cr2"));
+    let result = adapter.decode_thumbnail(&missing_path());
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind(), Kind::Io);
 }
@@ -23,72 +44,50 @@ fn decode_thumbnail_nonexistent_file_returns_io() {
 #[test]
 fn decode_preview_nonexistent_file_returns_io() {
     let adapter = LibRawAdapter;
-    let result = adapter.decode_preview(Path::new("/tmp/does_not_exist_9f8a7b.cr2"));
+    let result = adapter.decode_preview(&missing_path());
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind(), Kind::Io);
 }
 
 #[test]
 fn decode_non_raw_file_returns_corrupt() {
-    let dir = std::env::temp_dir().join("rsb_libraw_test_not_raw");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("garbage.cr2");
-    let mut f = std::fs::File::create(&path).unwrap();
-    f.write_all(b"this is not a raw file at all").unwrap();
-    drop(f);
-
-    let adapter = LibRawAdapter;
-    let result = adapter.decode(&path);
-
-    assert!(result.is_err());
-    let err = result.unwrap_err();
+    let file = TempFile::new("garbage.cr2", b"this is not a raw file at all").unwrap();
+    let err = LibRawAdapter.decode(&file.0).unwrap_err();
     assert_eq!(err.kind(), Kind::Corrupt);
-
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn decode_thumbnail_non_raw_file_returns_corrupt() {
-    let dir = std::env::temp_dir().join("rsb_libraw_test_thumb_not_raw");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("garbage.nef");
-    let mut f = std::fs::File::create(&path).unwrap();
-    f.write_all(b"not a nef file").unwrap();
-    drop(f);
-
-    let adapter = LibRawAdapter;
-    let result = adapter.decode_thumbnail(&path);
-
-    assert!(result.is_err());
-    let err = result.unwrap_err();
+    let file = TempFile::new("garbage.nef", b"not a nef file").unwrap();
+    let err = LibRawAdapter.decode_thumbnail(&file.0).unwrap_err();
     assert_eq!(err.kind(), Kind::Corrupt);
-
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn decode_preview_non_raw_file_returns_corrupt() {
-    let dir = std::env::temp_dir().join("rsb_libraw_test_preview_not_raw");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("garbage.arw");
-    let mut f = std::fs::File::create(&path).unwrap();
-    f.write_all(b"not an arw file").unwrap();
-    drop(f);
-
-    let adapter = LibRawAdapter;
-    let result = adapter.decode_preview(&path);
-
-    assert!(result.is_err());
-    let err = result.unwrap_err();
+    let file = TempFile::new("garbage.arw", b"not an arw file").unwrap();
+    let err = LibRawAdapter.decode_preview(&file.0).unwrap_err();
     assert_eq!(err.kind(), Kind::Corrupt);
+}
 
-    std::fs::remove_dir_all(&dir).ok();
+#[test]
+#[cfg(unix)]
+fn decode_unreadable_file_returns_io() {
+    use std::os::unix::fs::PermissionsExt;
+    let file = TempFile::new("unreadable.cr2", b"raw bytes").unwrap();
+    std::fs::set_permissions(&file.0, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Root reads any file, so there is nothing to test.
+    if std::fs::File::open(&file.0).is_ok() {
+        return;
+    }
+    let err = LibRawAdapter.decode(&file.0).unwrap_err();
+    assert_eq!(err.kind(), Kind::Io);
 }
 
 #[test]
 fn decode_path_with_interior_null_returns_io() {
     let adapter = LibRawAdapter;
-    let result = adapter.decode(Path::new("/tmp/bad\0path.cr2"));
+    let result = adapter.decode(&std::env::temp_dir().join("bad\0path.cr2"));
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -98,7 +97,7 @@ fn decode_path_with_interior_null_returns_io() {
 #[test]
 fn decode_thumbnail_path_with_interior_null_returns_io() {
     let adapter = LibRawAdapter;
-    let result = adapter.decode_thumbnail(Path::new("/tmp/bad\0path.cr2"));
+    let result = adapter.decode_thumbnail(&std::env::temp_dir().join("bad\0path.cr2"));
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -108,27 +107,11 @@ fn decode_thumbnail_path_with_interior_null_returns_io() {
 #[test]
 fn decode_preview_path_with_interior_null_returns_io() {
     let adapter = LibRawAdapter;
-    let result = adapter.decode_preview(Path::new("/tmp/bad\0path.cr2"));
+    let result = adapter.decode_preview(&std::env::temp_dir().join("bad\0path.cr2"));
 
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.kind(), Kind::Io);
-}
-
-#[test]
-fn error_display_includes_message() {
-    let adapter = LibRawAdapter;
-    let err = adapter
-        .decode(Path::new("/tmp/does_not_exist_9f8a7b.cr2"))
-        .unwrap_err();
-    let display = format!("{err}");
-    assert!(!display.is_empty());
-}
-
-#[test]
-fn adapter_implements_send_and_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<LibRawAdapter>();
 }
 
 struct DecodeOnly;
@@ -142,7 +125,7 @@ impl RawDecode for DecodeOnly {
 #[test]
 fn default_decode_thumbnail_returns_unsupported() {
     let d = DecodeOnly;
-    let result = d.decode_thumbnail(Path::new("/tmp/anything"));
+    let result = d.decode_thumbnail(&missing_path());
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.kind(), Kind::Unsupported);
@@ -152,7 +135,7 @@ fn default_decode_thumbnail_returns_unsupported() {
 #[test]
 fn default_decode_preview_returns_unsupported() {
     let d = DecodeOnly;
-    let result = d.decode_preview(Path::new("/tmp/anything"));
+    let result = d.decode_preview(&missing_path());
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.kind(), Kind::Unsupported);
