@@ -16,3 +16,12 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --message-format short -- -D warnings
       - run: cargo test --workspace --message-format short
+      # engineering/errors.md: no other error crate, no boxed dyn Error.
+      - name: errors
+        run: |
+          if git grep -nE '(^[[:space:]]*|dependencies\.)(anyhow|eyre|color-eyre|failure|error-chain|snafu)[[:space:]]*[]=.]' -- '*Cargo.toml'; then
+            echo "errors.md: a Cargo.toml lists a banned error crate"; exit 1
+          fi
+          if git grep -nE 'Box<[[:space:]]*dyn[[:space:]]+([[:alnum:]_]+::)*Error\b' -- '*.rs'; then
+            echo "errors.md: a source file boxes a dyn Error"; exit 1
+          fi

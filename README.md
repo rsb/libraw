@@ -22,7 +22,7 @@ Two crates, one boundary:
 ┌─────────────────────────────────────────────────────┐
 │  rsb-libraw              (pure Rust, fast build)   │
 │                                                     │
-│  pub mod error   — Kind, Error, ResultExt           │
+│  pub mod error   — Error, Cause (thiserror)         │
 │  pub mod image   — Pixel, ImageBuffer               │
 │  pub mod decode  — RawDecode trait                  │
 │  mod adapter     — LibRawAdapter                    │
@@ -103,21 +103,33 @@ display(&full);
 
 ### Error handling
 
-Errors are classified by recovery action:
+`Error` has one variant per category a caller acts on. Its `Display`
+names the category; `source()` holds what LibRaw, the JPEG decoder or
+this crate found:
 
 ```rust
-use rsb_libraw::{LibRawAdapter, RawDecode};
-use rsb_libraw::error::Kind;
+use std::error::Error as _;
+use rsb_libraw::{Error, LibRawAdapter, RawDecode};
 
 let adapter = LibRawAdapter;
 
 match adapter.decode(path) {
   Ok(image) => process(image),
-  Err(e) => match e.kind() {
-    Kind::Io          => eprintln!("file not found or bad path: {e}"),
-    Kind::Unsupported => eprintln!("camera/format not handled: {e}"),
-    Kind::Corrupt     => eprintln!("file data is malformed: {e}"),
-    Kind::Resource    => eprintln!("out of memory: {e}"),
+  Err(e) => {
+    match &e {
+      Error::Io(_)          => eprintln!("file not found or bad path"),
+      Error::Unsupported(_) => eprintln!("camera/format not handled"),
+      Error::Corrupt(_)     => eprintln!("file data is malformed"),
+      Error::Resource(_)    => eprintln!("out of memory"),
+    }
+    // "corrupt data: libraw_unpack failed: ..."
+    let mut text = e.to_string();
+    let mut source = e.source();
+    while let Some(s) = source {
+      text = format!("{text}: {s}");
+      source = s.source();
+    }
+    eprintln!("{text}");
   }
 }
 ```
@@ -167,12 +179,18 @@ let image = import_raw(&*decoder, Path::new("photo.arw"))?;
 
 ## Error classification
 
-| Kind | Meaning | Caller action |
+| Variant | Meaning | Caller action |
 |------|---------|---------------|
 | `Io` | Path invalid or file not accessible | Check path, permissions |
 | `Unsupported` | Input recognized but format not handled | Skip file or upgrade |
 | `Corrupt` | Data present but malformed | Reject file, report to user |
 | `Resource` | System resource exhaustion (OOM) | Back off or abort |
+
+`Io` and `Resource` hold the `LibRawError` from `rsb-libraw-ffi`.
+`Unsupported` and `Corrupt` hold a `Cause`: `LibRaw`, `Jpeg` for the
+embedded thumbnail, or `Check` for a check in this crate. `rsb_libraw::error`
+re-exports `LibRawError` and `ErrorCode`, so a caller can name them without
+depending on `rsb-libraw-ffi`. The rule is `engineering/errors.md`.
 
 ## Tests
 

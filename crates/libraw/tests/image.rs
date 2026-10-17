@@ -1,4 +1,4 @@
-use rsb_libraw::error::Kind;
+use rsb_libraw::Error;
 use rsb_libraw::image::{ImageBuffer, Pixel};
 
 // ---------------------------------------------------------------------------
@@ -61,7 +61,7 @@ fn get_last_valid_pixel() {
 fn new_impossible_dimensions_returns_corrupt() {
     let result = ImageBuffer::new(u32::MAX, u32::MAX, vec![]);
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err().kind(), Kind::Corrupt);
+    assert!(matches!(result.unwrap_err(), Error::Corrupt(_)));
 }
 
 // ---------------------------------------------------------------------------
@@ -84,14 +84,14 @@ fn pixel_from_packed_ignores_high_byte() {
 fn from_rgb8_zero_dimensions_non_empty_data_returns_corrupt() {
     let result = ImageBuffer::from_rgb8(&[1, 2, 3], 0, 0);
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err().kind(), Kind::Corrupt);
+    assert!(matches!(result.unwrap_err(), Error::Corrupt(_)));
 }
 
 #[test]
 fn from_rgb16_zero_dimensions_non_empty_data_returns_corrupt() {
     let result = ImageBuffer::from_rgb16(&[0; 6], 0, 0);
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err().kind(), Kind::Corrupt);
+    assert!(matches!(result.unwrap_err(), Error::Corrupt(_)));
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn image_buffer_construction() {
 fn image_buffer_rejects_mismatched_pixel_count() {
     let result = ImageBuffer::new(4, 4, vec![Pixel::from_packed(0); 5]);
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err().kind(), Kind::Corrupt);
+    assert!(matches!(result.unwrap_err(), Error::Corrupt(_)));
 }
 
 #[test]
@@ -168,7 +168,7 @@ fn image_buffer_from_rgb8_wrong_length_returns_corrupt() {
     let data: Vec<u8> = vec![255, 0, 0, 0, 255]; // 5 bytes, not 12
     let result = ImageBuffer::from_rgb8(&data, 2, 2);
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err().kind(), Kind::Corrupt);
+    assert!(matches!(result.unwrap_err(), Error::Corrupt(_)));
 }
 
 #[test]
@@ -192,7 +192,7 @@ fn image_buffer_from_rgb16_wrong_length_returns_corrupt() {
     let data: Vec<u8> = vec![0; 10]; // 10 bytes, not 6
     let result = ImageBuffer::from_rgb16(&data, 1, 1);
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err().kind(), Kind::Corrupt);
+    assert!(matches!(result.unwrap_err(), Error::Corrupt(_)));
 }
 
 #[test]
@@ -229,7 +229,7 @@ fn from_rgb8_overflow_dimensions() {
     let data = vec![0u8; 12];
     let result = ImageBuffer::from_rgb8(&data, u32::MAX, u32::MAX);
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err().kind(), Kind::Corrupt);
+    assert!(matches!(result.unwrap_err(), Error::Corrupt(_)));
 }
 
 #[test]
@@ -237,5 +237,5 @@ fn from_rgb16_overflow_dimensions() {
     let data = vec![0u8; 12];
     let result = ImageBuffer::from_rgb16(&data, u32::MAX, u32::MAX);
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err().kind(), Kind::Corrupt);
+    assert!(matches!(result.unwrap_err(), Error::Corrupt(_)));
 }

@@ -1,219 +1,72 @@
-use std::fmt;
-use std::panic::Location;
+//! The crate's error. Each variant is a failure category a caller can act
+//! on; the detail is in `source()`.
 
-// ---------------------------------------------------------------------------
-// Kind — the four failure categories that downstream code can match on
-// ---------------------------------------------------------------------------
+pub use rsb_libraw_ffi::{Error as LibRawError, ErrorCode};
 
-/// Classifies every error into one of four categories so callers can decide
-/// how to respond without parsing message strings. The variants map directly
-/// to the failure modes a RAW-processing pipeline encounters:
-///
-/// - `Io` — the file could not be read at all (missing, permissions, device).
-/// - `Unsupported` — the file was read but its format is not handled.
-/// - `Corrupt` — the file claims to be a supported format but its data is
-///   malformed, truncated, or internally inconsistent.
-/// - `Resource` — the operation failed due to memory or system limits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Kind {
-    Io,
-    Unsupported,
-    Corrupt,
-    Resource,
+/// Why a decode failed. `Display` names the category only; walk
+/// `source()` for what LibRaw, the JPEG decoder or this crate found.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// The file could not be read: missing, unreadable, or a path C cannot
+    /// take. Check the path and its permissions.
+    #[error("i/o failure")]
+    Io(#[source] LibRawError),
+    /// The file was read, but its camera, format or thumbnail is not
+    /// handled. Skip the file.
+    #[error("unsupported format")]
+    Unsupported(#[source] Cause),
+    /// The file claims a supported format but its data is malformed or
+    /// truncated. Reject the file.
+    #[error("corrupt data")]
+    Corrupt(#[source] Cause),
+    /// LibRaw ran out of memory or hit an internal limit. Back off or abort.
+    #[error("resource exhaustion")]
+    Resource(#[source] LibRawError),
 }
 
-impl Kind {
-    /// Returns a short, human-readable label for this category. Used as the
-    /// trailing phrase in `Display` output (e.g., "open failed: i/o failure").
-    pub fn default_message(&self) -> &'static str {
-        match self {
-            Kind::Io => "i/o failure",
-            Kind::Unsupported => "unsupported format",
-            Kind::Corrupt => "corrupt data",
-            Kind::Resource => "resource exhaustion",
+/// What found an `Unsupported` or `Corrupt` problem.
+#[derive(Debug, thiserror::Error)]
+pub enum Cause {
+    #[error(transparent)]
+    LibRaw(#[from] LibRawError),
+    #[error("JPEG thumbnail decode failed: {0}")]
+    Jpeg(#[from] jpeg_decoder::Error),
+    /// A check in this crate, such as image dimensions or output format.
+    #[error("{0}")]
+    Check(String),
+}
+
+/// Sorts a LibRaw failure into a category. A code not listed is `Corrupt`:
+/// it is safer to blame the file's data than I/O or resources.
+impl From<LibRawError> for Error {
+    fn from(err: LibRawError) -> Self {
+        match &err {
+            LibRawError::Init => Self::Resource(err),
+            LibRawError::Open(_) | LibRawError::PathNul => Self::Io(err),
+            #[cfg(not(unix))]
+            LibRawError::PathNotUtf8 => Self::Io(err),
+            LibRawError::Call { code, .. } => match code {
+                ErrorCode::IoError | ErrorCode::InputClosed => Self::Io(err),
+                ErrorCode::InsufficientMemory | ErrorCode::MempoolOverflow => Self::Resource(err),
+                ErrorCode::FileUnsupported
+                | ErrorCode::UnsupportedThumbnail
+                | ErrorCode::NotImplemented
+                | ErrorCode::NoThumbnail
+                | ErrorCode::RequestForNonexistentThumbnail => Self::Unsupported(err.into()),
+                _ => Self::Corrupt(err.into()),
+            },
         }
     }
-}
-
-impl fmt::Display for Kind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.default_message())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Error — a categorized, located, chainable error value
-// ---------------------------------------------------------------------------
-
-/// The crate's single error type. Every fallible operation returns this.
-///
-/// Design choices:
-/// - `kind` enables programmatic matching without downcasting.
-/// - `message` carries human-readable detail (may be empty).
-/// - `source` optionally wraps an underlying std::error::Error for chaining.
-/// - `location` captures the call site via `#[track_caller]`, so logs show
-///   where the error was constructed without needing a full backtrace.
-///
-/// The type is `Send + Sync` so it can cross thread boundaries (e.g., when
-/// decoding is dispatched to a thread pool).
-#[derive(Debug)]
-pub struct Error {
-    kind: Kind,
-    message: String,
-    source: Option<Box<dyn std::error::Error + Send + Sync>>,
-    location: &'static Location<'static>,
 }
 
 impl Error {
-    // -------------------------------------------------------------------------
-    // Constructors — one per Kind, all #[track_caller] so Location is correct
-    // -------------------------------------------------------------------------
-
-    /// Creates an I/O error. Use when the file system or device layer fails
-    /// (file not found, permission denied, read interrupted).
-    #[track_caller]
-    pub fn io(msg: impl Into<String>) -> Self {
-        Self {
-            kind: Kind::Io,
-            message: msg.into(),
-            source: None,
-            location: Location::caller(),
-        }
+    /// A `Corrupt` error from a check in this crate.
+    pub(crate) fn corrupt(msg: impl Into<String>) -> Self {
+        Self::Corrupt(Cause::Check(msg.into()))
     }
 
-    /// Creates an unsupported-format error. Use when the file is readable but
-    /// its codec, pixel layout, or container is not handled by this crate.
-    #[track_caller]
-    pub fn unsupported(msg: impl Into<String>) -> Self {
-        Self {
-            kind: Kind::Unsupported,
-            message: msg.into(),
-            source: None,
-            location: Location::caller(),
-        }
-    }
-
-    /// Creates a corrupt-data error. Use when the file header or payload
-    /// violates format invariants (bad magic, truncated segments, impossible
-    /// dimensions).
-    #[track_caller]
-    pub fn corrupt(msg: impl Into<String>) -> Self {
-        Self {
-            kind: Kind::Corrupt,
-            message: msg.into(),
-            source: None,
-            location: Location::caller(),
-        }
-    }
-
-    /// Creates a resource-exhaustion error. Use when memory allocation or
-    /// internal pool limits are exceeded.
-    #[track_caller]
-    pub fn resource(msg: impl Into<String>) -> Self {
-        Self {
-            kind: Kind::Resource,
-            message: msg.into(),
-            source: None,
-            location: Location::caller(),
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Builder methods
-    // -------------------------------------------------------------------------
-
-    /// Attaches a lower-level error as the cause. Appears in Display output
-    /// as "caused by: …" and is returned by `std::error::Error::source()`.
-    pub fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
-        self.source = Some(Box::new(source));
-        self
-    }
-
-    /// Prepends a contextual callsite description to the message, producing
-    /// "context: original message". If the original message is empty, the
-    /// context becomes the entire message. Kind and location are preserved
-    /// from the original error — context describes *where* the error surfaced,
-    /// not *what* went wrong.
-    pub fn context(self, ctx: impl Into<String>) -> Self {
-        let message = if self.message.is_empty() {
-            ctx.into()
-        } else {
-            format!("{}: {}", ctx.into(), self.message)
-        };
-
-        Self {
-            kind: self.kind,
-            message,
-            source: self.source,
-            location: self.location,
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Accessors
-    // -------------------------------------------------------------------------
-
-    /// Returns the error category.
-    pub fn kind(&self) -> Kind {
-        self.kind
-    }
-
-    /// Convenience predicate for matching a specific category.
-    pub fn is_kind(&self, kind: Kind) -> bool {
-        self.kind == kind
-    }
-
-    /// Returns the human-readable detail string (may be empty).
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-
-    /// Returns the source-code location where this error was constructed.
-    pub fn location(&self) -> &'static Location<'static> {
-        self.location
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Display — "message: kind\n  caused by: source"
-// ---------------------------------------------------------------------------
-
-impl fmt::Display for Error {
-    /// Format: `"{message}: {kind}"` when message is non-empty, otherwise just
-    /// `"{kind}"`. If a source is attached, appends `"\n  caused by: {source}"`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.message.is_empty() {
-            write!(f, "{}", self.kind.default_message())?;
-        } else {
-            write!(f, "{}: {}", self.message, self.kind.default_message())?;
-        }
-        if let Some(source) = &self.source {
-            write!(f, "\n  caused by: {source}")?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source
-            .as_ref()
-            .map(|s| s.as_ref() as &(dyn std::error::Error + 'static))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ResultExt — ergonomic .context() on Result<T, Error>
-// ---------------------------------------------------------------------------
-
-/// Extension trait that adds `.context("msg")` to `Result<T, Error>`, mirroring
-/// the pattern from anyhow/eyre but staying within this crate's error type.
-pub trait ResultExt<T> {
-    fn context(self, ctx: impl Into<String>) -> Result<T, Error>;
-}
-
-impl<T> ResultExt<T> for Result<T, Error> {
-    fn context(self, ctx: impl Into<String>) -> Result<T, Error> {
-        self.map_err(|e| e.context(ctx))
+    /// An `Unsupported` error from a check in this crate.
+    pub(crate) fn unsupported(msg: impl Into<String>) -> Self {
+        Self::Unsupported(Cause::Check(msg.into()))
     }
 }

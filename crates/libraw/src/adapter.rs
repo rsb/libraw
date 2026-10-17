@@ -3,7 +3,7 @@ use std::path::Path;
 use rsb_libraw_ffi::{self as ffi, ErrorCode, ImageFormat, MemImage, OutputBps, OutputColor};
 
 use crate::decode::RawDecode;
-use crate::error::{self as fail, ResultExt};
+use crate::error::{Cause, Error};
 use crate::image::ImageBuffer;
 
 // ---------------------------------------------------------------------------
@@ -19,81 +19,35 @@ pub struct LibRawAdapter;
 impl RawDecode for LibRawAdapter {
     /// Full-resolution decode: open → unpack → configure sRGB 16-bit →
     /// demosaic/process → extract image.
-    fn decode(&self, path: &Path) -> Result<ImageBuffer, fail::Error> {
-        let mut processor = ffi::Processor::new()
-            .map_err(from_ffi)
-            .context("LibRawAdapter::decode init failed")?;
-
-        open_file(&mut processor, path).context("LibRawAdapter::decode open failed")?;
-
-        processor
-            .unpack()
-            .map_err(from_ffi)
-            .context("LibRawAdapter::decode unpack failed")?;
-
+    fn decode(&self, path: &Path) -> Result<ImageBuffer, Error> {
+        let mut processor = ffi::Processor::new()?;
+        open_file(&mut processor, path)?;
+        processor.unpack()?;
         configure_output_srgb16(&mut processor);
-
-        processor
-            .dcraw_process()
-            .map_err(from_ffi)
-            .context("LibRawAdapter::decode process failed")?;
-
-        processor
-            .make_mem_image()
-            .map_err(from_ffi)
-            .and_then(rgb16_image)
-            .context("LibRawAdapter::decode make_mem_image failed")
+        processor.dcraw_process()?;
+        rgb16_image(processor.make_mem_image()?)
     }
 
     /// Extracts the camera-generated thumbnail. No processing step — thumbnails
     /// are pre-rendered by the camera firmware.
-    fn decode_thumbnail(&self, path: &Path) -> Result<ImageBuffer, fail::Error> {
-        let mut processor = ffi::Processor::new()
-            .map_err(from_ffi)
-            .context("LibRawAdapter::decode_thumbnail init failed")?;
-
-        open_file(&mut processor, path).context("LibRawAdapter::decode_thumbnail open failed")?;
-
-        processor
-            .unpack_thumb()
-            .map_err(from_ffi)
-            .context("LibRawAdapter::decode_thumbnail unpack_thumb failed")?;
-
-        processor
-            .make_mem_thumb()
-            .map_err(from_ffi)
-            .and_then(thumbnail_image)
-            .context("LibRawAdapter::decode_thumbnail make_mem_thumb failed")
+    fn decode_thumbnail(&self, path: &Path) -> Result<ImageBuffer, Error> {
+        let mut processor = ffi::Processor::new()?;
+        open_file(&mut processor, path)?;
+        processor.unpack_thumb()?;
+        thumbnail_image(processor.make_mem_thumb()?)
     }
 
     /// Half-resolution decode for fast previews. Same pipeline as decode but
     /// with half_size enabled — each Bayer quad becomes one pixel instead of
     /// four, trading resolution for speed.
-    fn decode_preview(&self, path: &Path) -> Result<ImageBuffer, fail::Error> {
-        let mut processor = ffi::Processor::new()
-            .map_err(from_ffi)
-            .context("LibRawAdapter::decode_preview init failed")?;
-
-        open_file(&mut processor, path).context("LibRawAdapter::decode_preview open failed")?;
-
-        processor
-            .unpack()
-            .map_err(from_ffi)
-            .context("LibRawAdapter::decode_preview unpack failed")?;
-
+    fn decode_preview(&self, path: &Path) -> Result<ImageBuffer, Error> {
+        let mut processor = ffi::Processor::new()?;
+        open_file(&mut processor, path)?;
+        processor.unpack()?;
         processor.set_half_size(true);
         configure_output_srgb16(&mut processor);
-
-        processor
-            .dcraw_process()
-            .map_err(from_ffi)
-            .context("LibRawAdapter::decode_preview process failed")?;
-
-        processor
-            .make_mem_image()
-            .map_err(from_ffi)
-            .and_then(rgb16_image)
-            .context("LibRawAdapter::decode_preview make_mem_image failed")
+        processor.dcraw_process()?;
+        rgb16_image(processor.make_mem_image()?)
     }
 }
 
@@ -113,7 +67,7 @@ fn configure_output_srgb16(processor: &mut ffi::Processor) {
 }
 
 /// Opens the file, applying the open-file classification below.
-fn open_file(processor: &mut ffi::Processor, path: &Path) -> Result<(), fail::Error> {
+fn open_file(processor: &mut ffi::Processor, path: &Path) -> Result<(), Error> {
     processor
         .open_file(path)
         .map_err(|e| classify_open_file_error(e, path.exists()))
@@ -122,32 +76,29 @@ fn open_file(processor: &mut ffi::Processor, path: &Path) -> Result<(), fail::Er
 /// Converts a processed full image. Unlike thumbnails, the output format is
 /// strictly validated: we configured 16-bit 3-channel sRGB, so anything else
 /// indicates a LibRaw bug or a pathological image.
-fn rgb16_image(image: MemImage) -> Result<ImageBuffer, fail::Error> {
+fn rgb16_image(image: MemImage) -> Result<ImageBuffer, Error> {
     if image.format != ImageFormat::Bitmap {
-        return Err(fail::Error::unsupported(
-            "decoded image is not bitmap format",
-        ));
+        return Err(Error::unsupported("decoded image is not bitmap format"));
     }
     if image.bits != 16 {
-        return Err(fail::Error::unsupported(format!(
+        return Err(Error::unsupported(format!(
             "expected 16-bit output, got {}-bit",
             image.bits
         )));
     }
     if image.colors != 3 {
-        return Err(fail::Error::unsupported(format!(
+        return Err(Error::unsupported(format!(
             "expected 3-channel RGB, got {} channels",
             image.colors
         )));
     }
     ImageBuffer::from_rgb16(&image.data, image.width, image.height)
-        .context("LibRaw decode pixel conversion failed")
 }
 
 /// Converts an extracted thumbnail. Thumbnails can be JPEG (most cameras),
 /// 8-bit bitmap, or 16-bit bitmap — this handles all three and returns
 /// Unsupported for anything else.
-fn thumbnail_image(image: MemImage) -> Result<ImageBuffer, fail::Error> {
+fn thumbnail_image(image: MemImage) -> Result<ImageBuffer, Error> {
     let MemImage {
         format,
         width,
@@ -160,48 +111,42 @@ fn thumbnail_image(image: MemImage) -> Result<ImageBuffer, fail::Error> {
         ImageFormat::Jpeg => decode_jpeg_thumbnail(&data),
         ImageFormat::Bitmap if bits == 8 && colors == 3 => {
             ImageBuffer::from_rgb8(&data, width, height)
-                .context("thumbnail bitmap RGB8 conversion failed")
         }
         ImageFormat::Bitmap if bits == 16 && colors == 3 => {
             ImageBuffer::from_rgb16(&data, width, height)
-                .context("thumbnail bitmap RGB16 conversion failed")
         }
-        ImageFormat::Bitmap => Err(fail::Error::unsupported(format!(
+        ImageFormat::Bitmap => Err(Error::unsupported(format!(
             "thumbnail bitmap format: {bits}-bit, {colors} channels"
         ))),
-        other => Err(fail::Error::unsupported(format!(
-            "thumbnail format {other:?}"
-        ))),
+        other => Err(Error::unsupported(format!("thumbnail format {other:?}"))),
     }
 }
 
 /// Decodes an embedded JPEG thumbnail into an ImageBuffer. Most cameras store
 /// thumbnails as JPEGs; this normalizes them into the same pixel format as
 /// full decodes so downstream code doesn't need to know the original encoding.
-fn decode_jpeg_thumbnail(jpeg_data: &[u8]) -> Result<ImageBuffer, fail::Error> {
+fn decode_jpeg_thumbnail(jpeg_data: &[u8]) -> Result<ImageBuffer, Error> {
     use jpeg_decoder::{Decoder, PixelFormat};
 
     let mut decoder = Decoder::new(jpeg_data);
     let pixels = decoder
         .decode()
-        .map_err(|e| fail::Error::corrupt(format!("JPEG thumbnail decode failed: {e}")))?;
+        .map_err(|e| Error::Corrupt(Cause::Jpeg(e)))?;
 
     let info = decoder
         .info()
-        .ok_or_else(|| fail::Error::corrupt("JPEG thumbnail decoded but produced no image info"))?;
+        .ok_or_else(|| Error::corrupt("JPEG thumbnail decoded but produced no image info"))?;
 
     match info.pixel_format {
         PixelFormat::RGB24 => {
             ImageBuffer::from_rgb8(&pixels, info.width as u32, info.height as u32)
-                .context("JPEG thumbnail pixel conversion failed")
         }
         // Grayscale thumbnails (some older cameras): expand each gray value to R=G=B.
         PixelFormat::L8 => {
             let rgb: Vec<u8> = pixels.iter().flat_map(|&g| [g, g, g]).collect();
             ImageBuffer::from_rgb8(&rgb, info.width as u32, info.height as u32)
-                .context("JPEG thumbnail grayscale conversion failed")
         }
-        other => Err(fail::Error::unsupported(format!(
+        other => Err(Error::unsupported(format!(
             "JPEG thumbnail pixel format: {other:?}"
         ))),
     }
@@ -217,45 +162,19 @@ fn decode_jpeg_thumbnail(jpeg_data: &[u8]) -> Result<ImageBuffer, fail::Error> {
 /// LibRaw reports a file too short to identify this way. The race condition
 /// (file deleted between LibRaw's open and our exists check) is accepted as
 /// best-effort.
-fn classify_open_file_error(err: ffi::Error, path_exists: bool) -> fail::Error {
+fn classify_open_file_error(err: ffi::Error, path_exists: bool) -> Error {
     match err {
         ffi::Error::Call {
             code: ErrorCode::IoError,
             ..
-        } if path_exists => fail::Error::corrupt(err.to_string()),
-        other => from_ffi(other),
-    }
-}
-
-/// Maps a LibRaw failure to the crate's Kind. The catch-all default is
-/// Corrupt: if LibRaw returns an unrecognized code, it's safer to assume the
-/// file's data is bad than to blame I/O or resources.
-fn from_ffi(err: ffi::Error) -> fail::Error {
-    let detail = err.to_string();
-    match err {
-        ffi::Error::Init => fail::Error::resource(detail),
-        ffi::Error::Open(_) | ffi::Error::PathNul => fail::Error::io(detail),
-        #[cfg(not(unix))]
-        ffi::Error::PathNotUtf8 => fail::Error::io(detail),
-        ffi::Error::Call { code, .. } => match code {
-            ErrorCode::IoError | ErrorCode::InputClosed => fail::Error::io(detail),
-            ErrorCode::InsufficientMemory | ErrorCode::MempoolOverflow => {
-                fail::Error::resource(detail)
-            }
-            ErrorCode::FileUnsupported
-            | ErrorCode::UnsupportedThumbnail
-            | ErrorCode::NotImplemented
-            | ErrorCode::NoThumbnail
-            | ErrorCode::RequestForNonexistentThumbnail => fail::Error::unsupported(detail),
-            _ => fail::Error::corrupt(detail),
-        },
+        } if path_exists => Error::Corrupt(Cause::LibRaw(err)),
+        other => other.into(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::Kind;
 
     fn call(code: ErrorCode) -> ffi::Error {
         ffi::Error::Call {
@@ -269,70 +188,37 @@ mod tests {
     fn decode_jpeg_thumbnail_corrupt_data() {
         let result = decode_jpeg_thumbnail(b"not a jpeg at all");
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), Kind::Corrupt);
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::Corrupt(Cause::Jpeg(_))
+        ));
     }
 
     #[test]
     fn decode_jpeg_thumbnail_empty_data() {
         let result = decode_jpeg_thumbnail(b"");
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), Kind::Corrupt);
-    }
-
-    #[test]
-    fn from_ffi_maps_io_codes() {
-        assert_eq!(from_ffi(call(ErrorCode::IoError)).kind(), Kind::Io);
-        assert_eq!(from_ffi(call(ErrorCode::InputClosed)).kind(), Kind::Io);
-    }
-
-    #[test]
-    fn from_ffi_maps_resource_codes() {
-        assert_eq!(
-            from_ffi(call(ErrorCode::InsufficientMemory)).kind(),
-            Kind::Resource
-        );
-        assert_eq!(
-            from_ffi(call(ErrorCode::MempoolOverflow)).kind(),
-            Kind::Resource
-        );
-    }
-
-    #[test]
-    fn from_ffi_maps_unsupported_codes() {
-        for code in [
-            ErrorCode::FileUnsupported,
-            ErrorCode::UnsupportedThumbnail,
-            ErrorCode::NotImplemented,
-            ErrorCode::NoThumbnail,
-            ErrorCode::RequestForNonexistentThumbnail,
-        ] {
-            assert_eq!(from_ffi(call(code)).kind(), Kind::Unsupported, "{code:?}");
-        }
-    }
-
-    #[test]
-    fn from_ffi_unknown_code_maps_to_corrupt() {
-        assert_eq!(
-            from_ffi(call(ErrorCode::Other(999999))).kind(),
-            Kind::Corrupt
-        );
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::Corrupt(Cause::Jpeg(_))
+        ));
     }
 
     #[test]
     fn classify_open_file_io_error_with_existing_path_returns_corrupt() {
         let err = classify_open_file_error(call(ErrorCode::IoError), true);
-        assert_eq!(err.kind(), Kind::Corrupt);
+        assert!(matches!(err, Error::Corrupt(Cause::LibRaw(_))));
     }
 
     #[test]
     fn classify_open_file_io_error_with_missing_path_returns_io() {
         let err = classify_open_file_error(call(ErrorCode::IoError), false);
-        assert_eq!(err.kind(), Kind::Io);
+        assert!(matches!(err, Error::Io(_)));
     }
 
     #[test]
     fn classify_open_file_non_io_error_ignores_path_exists() {
         let err = classify_open_file_error(call(ErrorCode::FileUnsupported), true);
-        assert_eq!(err.kind(), Kind::Unsupported);
+        assert!(matches!(err, Error::Unsupported(_)));
     }
 }

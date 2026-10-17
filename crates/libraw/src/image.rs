@@ -1,4 +1,4 @@
-use crate::error::{self as fail};
+use crate::error::Error;
 
 // ---------------------------------------------------------------------------
 // Pixel — packed 0x00RRGGBB in a single u32
@@ -87,19 +87,18 @@ impl ImageBuffer {
     /// Validates that `pixels.len() == width * height` (with overflow-checked
     /// multiplication for 32-bit targets) and constructs the buffer. This is
     /// the sole enforcement point for the length invariant.
-    pub fn new(width: u32, height: u32, pixels: Vec<Pixel>) -> Result<Self, fail::Error> {
+    pub fn new(width: u32, height: u32, pixels: Vec<Pixel>) -> Result<Self, Error> {
         let expected = (width as usize)
             .checked_mul(height as usize)
-            .ok_or_else(|| fail::Error::corrupt("width * height overflows usize"))?;
+            .ok_or_else(|| Error::corrupt("width * height overflows usize"))?;
         if pixels.len() != expected {
-            return Err(fail::Error::corrupt(format!(
+            return Err(Error::corrupt(format!(
                 "pixel count {} does not match width * height ({}x{} = {})",
                 pixels.len(),
                 width,
                 height,
                 expected,
-            ))
-            .context("ImageBuffer::new failed"));
+            )));
         }
         Ok(Self {
             width,
@@ -138,20 +137,19 @@ impl ImageBuffer {
     /// as produced by JPEG thumbnail decoding) into packed Pixel values.
     /// Expects exactly `width * height * 3` bytes — one byte per channel, three
     /// channels per pixel, for every pixel in the image.
-    pub fn from_rgb8(data: &[u8], width: u32, height: u32) -> Result<Self, fail::Error> {
+    pub fn from_rgb8(data: &[u8], width: u32, height: u32) -> Result<Self, Error> {
         let expected = (width as usize)
             .checked_mul(height as usize)
             .and_then(|n| n.checked_mul(3))
-            .ok_or_else(|| fail::Error::corrupt("RGB8 dimensions overflow usize"))?;
+            .ok_or_else(|| Error::corrupt("RGB8 dimensions overflow usize"))?;
         if data.len() != expected {
-            return Err(fail::Error::corrupt(format!(
+            return Err(Error::corrupt(format!(
                 "RGB8 data length {} does not match {}x{}x3 = {}",
                 data.len(),
                 width,
                 height,
                 expected,
-            ))
-            .context("ImageBuffer::from_rgb8 failed"));
+            )));
         }
 
         // as_chunks::<3>() yields non-overlapping 3-byte arrays and returns any
@@ -174,20 +172,19 @@ impl ImageBuffer {
     /// Converts a flat 16-bit-per-channel RGB buffer (6 bytes per pixel) into
     /// 8-bit packed pixels. Common source: RAW files from high-end cameras and
     /// HDR workflows where each channel has 16 bits of dynamic range.
-    pub fn from_rgb16(data: &[u8], width: u32, height: u32) -> Result<Self, fail::Error> {
+    pub fn from_rgb16(data: &[u8], width: u32, height: u32) -> Result<Self, Error> {
         let expected = (width as usize)
             .checked_mul(height as usize)
             .and_then(|n| n.checked_mul(6))
-            .ok_or_else(|| fail::Error::corrupt("RGB16 dimensions overflow usize"))?;
+            .ok_or_else(|| Error::corrupt("RGB16 dimensions overflow usize"))?;
         if data.len() != expected {
-            return Err(fail::Error::corrupt(format!(
+            return Err(Error::corrupt(format!(
                 "RGB16 data length {} does not match {}x{}x6 = {}",
                 data.len(),
                 width,
                 height,
                 expected,
-            ))
-            .context("ImageBuffer::from_rgb16 failed"));
+            )));
         }
 
         // Each 6-byte chunk is three u16 channels in native byte order (R, G, B).

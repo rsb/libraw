@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 rsb-libraw-ffi = { workspace = true }
+thiserror = { workspace = true }
 jpeg-decoder = { version = "0.3", default-features = false }
 
 [lints]
