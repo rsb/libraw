@@ -6,7 +6,7 @@
 // sub-second incremental builds as long as the vendored source hasn't changed.
 //
 // The build has three phases:
-//   1. Compile all .cpp files under vendor/LibRaw-0.22.1/src/ into libraw.a,
+//   1. Compile all .cpp files under vendor/LibRaw-0.22.2/src/ into libraw.a,
 //      with optional OpenMP support detected at build time.
 //   2. Link the appropriate OpenMP runtime (libgomp for GNU, libomp for Clang)
 //      if the probe succeeded.
@@ -21,7 +21,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let vendor = Path::new("vendor/LibRaw-0.22.1");
+    let vendor = Path::new("vendor/LibRaw-0.22.2");
     let src_dir = vendor.join("src");
 
     let cpp_files = collect_cpp_files(&src_dir);
@@ -65,7 +65,7 @@ fn main() {
         }
     }
 
-    println!("cargo:rerun-if-changed=vendor/LibRaw-0.22.1");
+    println!("cargo:rerun-if-changed=vendor/LibRaw-0.22.2");
 
     // Phase 3: generate Rust bindings from libraw.h.
     // The allowlist restricts output to the functions, types and constants that the

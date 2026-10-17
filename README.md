@@ -39,7 +39,7 @@ Two crates, one boundary:
 │                    in this crate                    │
 │  src/error.rs    — Error, ErrorCode (thiserror)     │
 │  src/lib.rs      — keeps generated bindings private │
-│  vendor/         — LibRaw 0.22.1 source tree        │
+│  vendor/         — LibRaw 0.22.2 source tree        │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -184,18 +184,26 @@ owner's machines a missing fixture fails the test.
 
 ## Vendored LibRaw source
 
-LibRaw 0.22.1 is vendored under `crates/ffi/vendor/LibRaw-0.22.1/`.
+LibRaw 0.22.2 is vendored under `crates/ffi/vendor/LibRaw-0.22.2/`.
 
-- Source: https://github.com/LibRaw/LibRaw/releases/tag/0.22.1
+- Source: https://github.com/LibRaw/LibRaw/releases/tag/0.22.2
 - License: CDDL-1.0 (file-level copyleft). Only modifications to
   LibRaw source files trigger disclosure. This repo does not modify
   vendored source.
 
 ## Updating LibRaw
 
-1. Download the new release from GitHub
-2. Replace `crates/ffi/vendor/LibRaw-0.22.1/` with the new version
-3. Update the path in `crates/ffi/build.rs`
-4. Run `cargo check` to verify bindings generate correctly
-5. Run the full test suite against sample RAW files
-6. Update this README with the new version number
+1. Download the new release from GitHub and extract it.
+2. Replace `crates/ffi/vendor/LibRaw-0.22.2/` with the new release's
+   `COPYRIGHT`, `LICENSE.CDDL`, `LICENSE.LGPL`, `README.md`, `internal/`,
+   `libraw/` and `src/`, unmodified. Check each with `diff -r` against
+   the extract.
+3. Run `git grep <old version> -- ':!plan'` and update every hit,
+   including the path in `crates/ffi/build.rs` and this README.
+4. Run `cargo check` to verify the bindings generate and their layout
+   assertions compile.
+5. Recheck each LibRaw bug `Processor` works around, in
+   `crates/ffi/src/processor.rs`, against the new source. Remove a
+   workaround and its test if the bug is fixed; otherwise update the
+   file and line its comment cites.
+6. Run the full test suite against sample RAW files.
