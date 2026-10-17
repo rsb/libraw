@@ -7,6 +7,13 @@ NEF, ARW, RAF, RW2, DNG, and more).
 This repository exists so downstream consumers get pre-built LibRaw
 bindings without compiling 60k lines of C++ in their own workspace.
 
+Status: decodes to 8-bit sRGB (full, half-size preview, embedded
+thumbnail). No consumer yet; Lumen will take it as a git dependency once
+it provides linear camera RGB and metadata.
+
+Standards shared with the rsb apps live in `../rules`. The rules this
+repository enforces, and their checks, are in `engineering/`.
+
 ## Architecture
 
 Two crates, one boundary:
@@ -161,6 +168,14 @@ let image = import_raw(&*decoder, Path::new("photo.arw"))?;
 | `Unsupported` | Input recognized but format not handled | Skip file or upgrade |
 | `Corrupt` | Data present but malformed | Reject file, report to user |
 | `Resource` | System resource exhaustion (OOM) | Back off or abort |
+
+## Tests
+
+No test reads a RAW file yet; the suite runs on in-memory data. When tests
+need RAW files, fixtures follow Lumen's rules: named by role, never by file,
+and kept out of git. A test whose fixture is missing skips with one line
+naming the role and the reason, so CI shows what did not run; on the
+owner's machines a missing fixture fails the test.
 
 ## Vendored LibRaw source
 
