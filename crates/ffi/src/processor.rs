@@ -91,7 +91,9 @@ impl Processor {
         // uninitialised-size read; a file deleted between that open and
         // LibRaw's stat can still reach it. That read gives a wrong error
         // code, not a memory access by us, and is a LibRaw bug this crate
-        // cannot close without patching the vendored source.
+        // cannot close without patching the vendored source. The read:
+        // LibRaw_bigfile_datastream's constructor leaves _fsize unset when
+        // stat fails (0.22.2 src/libraw_datastream.cpp:466).
         let rc = unsafe { raw::libraw_open_file(self.ptr.as_ptr(), c_path.as_ptr()) };
         check(rc, "libraw_open_file")
     }
@@ -147,8 +149,9 @@ impl Processor {
     /// `dcraw_process` has run on the open file.
     pub fn make_mem_image(&mut self) -> Result<MemImage, Error> {
         // LibRaw allocates the image, then ignores the out-of-order error
-        // from filling it, and returns uninitialised pixels. Its own check,
-        // made here first, keeps that buffer from being read.
+        // from filling it, and returns uninitialised pixels (0.22.2
+        // src/postprocessing/mem_image.cpp:301 ignores the check at 193).
+        // Its own check, made here first, keeps that buffer from being read.
         if self.progress() < raw::LibRaw_progress_LIBRAW_PROGRESS_PRE_INTERPOLATE {
             return Err(Error::call(
                 "libraw_dcraw_make_mem_image",
@@ -242,7 +245,8 @@ fn take_mem_image(
 const ENOMEM: i32 = 12;
 
 /// The `dcraw_make_mem_*` calls report a failed `malloc` as `ENOMEM`, an
-/// errno, where every other failure is a `LibRaw_errors` code. This puts it
+/// errno, where every other failure is a `LibRaw_errors` code (0.22.2
+/// `src/postprocessing/mem_image.cpp:58`, 92, 129 and 289). This puts it
 /// back in LibRaw's terms.
 fn libraw_code(errcode: i32) -> i32 {
     if errcode == ENOMEM {
