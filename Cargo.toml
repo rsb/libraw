@@ -11,3 +11,17 @@ publish = false
 
 [workspace.dependencies]
 rsb-libraw-ffi = { path = "crates/ffi" }
+
+# Never crash, engineering/never-crash.md. The default for any new crate. Both
+# current crates need `unsafe` for FFI, so each repeats this table without
+# `unsafe_code`; keep the three in step.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+let_underscore_must_use = "deny"
