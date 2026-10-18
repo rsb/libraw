@@ -5,7 +5,10 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+rsb-errors = { workspace = true }
 rsb-libraw-ffi = { workspace = true }
+snafu = { workspace = true }
+tracing = { workspace = true }
 jpeg-decoder = { version = "0.3", default-features = false }
 
 [lints]

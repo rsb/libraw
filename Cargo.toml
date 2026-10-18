@@ -10,7 +10,10 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
+rsb-errors = { git = "https://github.com/rsb/errors-rs", tag = "v0.1.1" }
 rsb-libraw-ffi = { path = "crates/ffi" }
+snafu = "0.9"
+tracing = "0.1"
 thiserror = "2"
 
 # Never crash, engineering/never-crash.md. The default for any new crate.
