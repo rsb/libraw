@@ -12,7 +12,9 @@ thumbnail). No consumer yet; Lumen will take it as a git dependency once
 it provides linear camera RGB and metadata.
 
 Standards shared with the rsb apps live in `../rules`. The rules this
-repository enforces, and their checks, are in `engineering/`.
+repository enforces, and their checks, are in `engineering/`: `errors.md`,
+`panics.md` and `logging.md` point at the shared standards, and
+`cargo xtask errors` runs their checks.
 
 ## Architecture
 
