@@ -15,7 +15,7 @@
 //      hundreds of declarations for LibRaw's full internal API.
 
 // A build script that cannot proceed should stop the build, so it may panic.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used)]
 
 use std::env;
 use std::path::{Path, PathBuf};

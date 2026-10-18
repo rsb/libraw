@@ -19,7 +19,10 @@ pub struct Pixel(u32);
 // Compile-time proof that repr(transparent) produced the expected layout.
 // Guards against future field additions or wrapper changes silently breaking
 // the assumption that &[Pixel] can be reinterpreted as &[u32].
-const _: () = assert!(size_of::<Pixel>() == size_of::<u32>());
+const _: () = assert!(
+    size_of::<Pixel>() == size_of::<u32>(),
+    "Pixel is repr(transparent) over u32, so &[Pixel] reinterprets as &[u32]"
+);
 
 // Methods take `self` by value (not &self) because Pixel is Copy and fits in
 // a register — passing by value avoids an indirection and lets the compiler

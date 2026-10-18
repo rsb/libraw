@@ -15,7 +15,6 @@ pub use processor::{ImageFormat, MemImage, OutputBps, OutputColor, Processor};
 #[allow(non_camel_case_types)]
 #[allow(non_snake_case)]
 #[allow(dead_code)]
-#[allow(clippy::indexing_slicing)]
 #[allow(clippy::undocumented_unsafe_blocks)]
 mod bindings {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
