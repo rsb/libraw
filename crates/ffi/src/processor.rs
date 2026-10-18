@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use crate::bindings as raw;
 use snafu::ResultExt;
-use tracing::debug;
+use tracing::trace;
 
 use crate::error::{Error, OpenSnafu};
 
@@ -270,11 +270,12 @@ fn libraw_code(errcode: i32) -> i32 {
     }
 }
 
-/// Runs one LibRaw call and logs its name and duration at `debug`.
+/// Runs one LibRaw call and logs its name and duration at `trace`, the
+/// level logging.md gives per-FFI-call detail.
 fn timed<T>(call: &'static str, f: impl FnOnce() -> T) -> T {
     let start = Instant::now();
     let out = f();
-    debug!(call, elapsed = ?start.elapsed(), "libraw call");
+    trace!(call, elapsed = ?start.elapsed(), "libraw call");
     out
 }
 
