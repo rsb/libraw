@@ -16,3 +16,4 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --message-format short -- -D warnings
       - run: cargo test --workspace --message-format short
+      - run: cargo xtask errors
