@@ -83,18 +83,34 @@ pub enum Error {
     #[snafu(display("path is not valid UTF-8"))]
     PathNotUtf8,
     /// A LibRaw call returned a code other than success. `message` is
-    /// LibRaw's own text for the code.
-    #[snafu(display("{call} failed: {message}"))]
+    /// LibRaw's own text for the code; `location` is the line that made
+    /// the call.
+    #[snafu(display("{call} failed{location}: {message}"))]
     Call {
         call: &'static str,
         code: ErrorCode,
         message: String,
+        #[snafu(implicit)]
+        location: Loc,
     },
 }
 
 impl Error {
+    /// The variant's path, dotted. Codes are API: add one, never rename one.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Error::Init => "libraw_ffi.init",
+            Error::Open { .. } => "libraw_ffi.open",
+            Error::PathNul => "libraw_ffi.path_nul",
+            #[cfg(not(unix))]
+            Error::PathNotUtf8 => "libraw_ffi.path_not_utf8",
+            Error::Call { .. } => "libraw_ffi.call",
+        }
+    }
+
     /// The error for LibRaw call `call` returning `rc`, with LibRaw's text
-    /// for the code.
+    /// for the code, located at the caller's line.
+    #[track_caller]
     pub(crate) fn call(call: &'static str, rc: i32) -> Self {
         // SAFETY: libraw_strerror takes any int and returns null or a
         // pointer to a static NUL-terminated string.
@@ -105,6 +121,7 @@ impl Error {
             call,
             code: ErrorCode::from_raw(rc),
             message,
+            location: snafu::GenerateImplicitData::generate(),
         }
     }
 }
@@ -210,7 +227,12 @@ mod tests {
                 ..
             }
         ));
-        assert!(err.to_string().starts_with("libraw_open_file failed: "));
+        let shown = err.to_string();
+        assert!(
+            shown.starts_with("libraw_open_file failed (at crates/ffi/src/error.rs:"),
+            "{shown}"
+        );
+        assert_eq!(err.code(), "libraw_ffi.call");
     }
 
     #[test]

@@ -54,7 +54,7 @@ const CASES: [(&str, usize, &str); 3] = [
     ),
     (
         "notes.txt",
-        1,
+        2,
         "open: libraw_open_file failed: Unsupported file format or not RAW file",
     ),
 ];

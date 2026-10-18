@@ -11,6 +11,7 @@ fn open_on_a_missing_file_has_one_location_and_one_line_without() {
     let mut processor = Processor::new().unwrap();
     let e = processor.open_file(&path).unwrap_err();
     assert!(matches!(e, Error::Open { .. }), "{e:?}");
+    assert_eq!(e.code(), "libraw_ffi.open");
 
     let shown = e.to_string();
     assert_eq!(shown.matches(" (at ").count(), 1, "one location: {shown}");

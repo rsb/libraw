@@ -20,6 +20,7 @@ fn call(code: ErrorCode) -> ffi::Error {
         call: "libraw_unpack",
         code,
         message: "LibRaw's text".into(),
+        location: snafu::GenerateImplicitData::generate(),
     }
 }
 

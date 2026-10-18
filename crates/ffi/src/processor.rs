@@ -208,7 +208,9 @@ impl Drop for Allocation {
 }
 
 /// Copies a processed image LibRaw returned into owned memory and frees it.
-/// A null pointer means the call failed with `errcode`.
+/// A null pointer means the call failed with `errcode`, and the error's
+/// location is the caller's line.
+#[track_caller]
 fn take_mem_image(
     ptr: *mut raw::libraw_processed_image_t,
     errcode: i32,
@@ -258,6 +260,9 @@ fn libraw_code(errcode: i32) -> i32 {
     }
 }
 
+/// `Ok` for success, else the `Call` error for `rc`, located at the caller's
+/// line, so the location names the LibRaw call that failed.
+#[track_caller]
 fn check(rc: i32, call: &'static str) -> Result<(), Error> {
     if rc == raw::LibRaw_errors_LIBRAW_SUCCESS {
         Ok(())
@@ -284,6 +289,24 @@ fn path_to_cstring(path: &Path) -> Result<CString, Error> {
 mod tests {
     use super::*;
     use crate::error::ErrorCode;
+
+    fn call_line(err: &Error) -> u32 {
+        match err {
+            Error::Call { location, .. } => location.line(),
+            other => panic!("not a Call: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_call_error_is_located_at_the_line_that_checked_it() {
+        let line = line!() + 1;
+        let err = check(raw::LibRaw_errors_LIBRAW_IO_ERROR, "test").unwrap_err();
+        assert_eq!(call_line(&err), line);
+
+        let line = line!() + 1;
+        let err = take_mem_image(std::ptr::null_mut(), 0, "test").unwrap_err();
+        assert_eq!(call_line(&err), line);
+    }
 
     #[test]
     fn opening_a_missing_file_fails_before_libraw() {
