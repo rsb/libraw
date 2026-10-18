@@ -1,5 +1,8 @@
 use std::ffi::{CStr, c_char};
 
+use rsb_errors::Loc;
+use snafu::prelude::*;
+
 use crate::bindings as raw;
 
 /// A LibRaw return code: one variant per `LibRaw_errors` constant in
@@ -56,27 +59,32 @@ impl ErrorCode {
 
 /// Why a `Processor` call failed. Says what happened at the C boundary;
 /// what the caller should do about it is `rsb-libraw`'s decision.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
 pub enum Error {
     /// `libraw_init` returned null: LibRaw could not allocate its state.
-    #[error("libraw_init returned null")]
+    #[snafu(display("libraw_init returned null"))]
     Init,
     /// The path could not be opened for reading, checked before LibRaw sees
     /// it: missing, unreadable, or a bad path. LibRaw's own open reads an
     /// uninitialised size when its `stat` fails, and reports a missing file
     /// as `TooBig` or `IoError` at random.
-    #[error("cannot open file: {0}")]
-    Open(std::io::Error),
+    #[snafu(display("cannot open file{location}: {source}"))]
+    Open {
+        source: std::io::Error,
+        #[snafu(implicit)]
+        location: Loc,
+    },
     /// The path holds a null byte, so C cannot see all of it.
-    #[error("path contains interior null byte")]
+    #[snafu(display("path contains interior null byte"))]
     PathNul,
     /// The path is not UTF-8, which LibRaw needs outside Unix.
     #[cfg(not(unix))]
-    #[error("path is not valid UTF-8")]
+    #[snafu(display("path is not valid UTF-8"))]
     PathNotUtf8,
     /// A LibRaw call returned a code other than success. `message` is
     /// LibRaw's own text for the code.
-    #[error("{call} failed: {message}")]
+    #[snafu(display("{call} failed: {message}"))]
     Call {
         call: &'static str,
         code: ErrorCode,

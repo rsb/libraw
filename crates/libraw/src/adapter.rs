@@ -234,7 +234,7 @@ fn from_ffi(err: ffi::Error) -> fail::Error {
     let detail = err.to_string();
     match err {
         ffi::Error::Init => fail::Error::resource(detail),
-        ffi::Error::Open(_) | ffi::Error::PathNul => fail::Error::io(detail),
+        ffi::Error::Open { .. } | ffi::Error::PathNul => fail::Error::io(detail),
         #[cfg(not(unix))]
         ffi::Error::PathNotUtf8 => fail::Error::io(detail),
         ffi::Error::Call { code, .. } => match code {

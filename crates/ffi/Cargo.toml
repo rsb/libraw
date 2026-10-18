@@ -7,7 +7,6 @@ publish.workspace = true
 [dependencies]
 rsb-errors = { workspace = true }
 snafu = { workspace = true }
-thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [build-dependencies]

@@ -3,7 +3,9 @@ use std::path::Path;
 use std::ptr::NonNull;
 
 use crate::bindings as raw;
-use crate::error::Error;
+use snafu::ResultExt;
+
+use crate::error::{Error, OpenSnafu};
 
 /// The color space LibRaw converts to (`params.output_color`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +86,7 @@ impl Processor {
     /// Opens and identifies the file at `path`.
     pub fn open_file(&mut self, path: &Path) -> Result<(), Error> {
         let c_path = path_to_cstring(path)?;
-        std::fs::File::open(path).map_err(Error::Open)?;
+        std::fs::File::open(path).context(OpenSnafu)?;
         // SAFETY: self.ptr is a live instance; c_path is NUL-terminated and
         // outlives the call, and LibRaw copies the name it keeps. The open
         // above keeps a missing or unreadable path away from LibRaw's
@@ -290,7 +292,7 @@ mod tests {
             .open_file(&std::env::temp_dir().join("does_not_exist_9f8a7b.cr2"))
             .unwrap_err();
         assert!(
-            matches!(&err, Error::Open(e) if e.kind() == std::io::ErrorKind::NotFound),
+            matches!(&err, Error::Open { source, .. } if source.kind() == std::io::ErrorKind::NotFound),
             "{err:?}"
         );
     }
@@ -314,7 +316,7 @@ mod tests {
         }
         let err = result.unwrap_err();
         assert!(
-            matches!(&err, Error::Open(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            matches!(&err, Error::Open { source, .. } if source.kind() == std::io::ErrorKind::PermissionDenied),
             "{err:?}"
         );
     }
