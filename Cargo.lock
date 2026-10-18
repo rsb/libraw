@@ -241,7 +241,6 @@ dependencies = [
  "rsb-errors",
  "rsb-libraw-ffi",
  "snafu",
- "tracing",
 ]
 
 [[package]]

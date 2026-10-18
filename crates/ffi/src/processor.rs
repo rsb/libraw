@@ -1,9 +1,11 @@
 use std::ffi::CString;
 use std::path::Path;
 use std::ptr::NonNull;
+use std::time::Instant;
 
 use crate::bindings as raw;
 use snafu::ResultExt;
+use tracing::debug;
 
 use crate::error::{Error, OpenSnafu};
 
@@ -79,7 +81,7 @@ impl Processor {
     pub fn new() -> Result<Self, Error> {
         // SAFETY: libraw_init takes no pointers and returns null or a new
         // instance that we own until libraw_close.
-        let ptr = unsafe { raw::libraw_init(0) };
+        let ptr = timed("libraw_init", || unsafe { raw::libraw_init(0) });
         NonNull::new(ptr).map(|ptr| Self { ptr }).ok_or(Error::Init)
     }
 
@@ -96,23 +98,26 @@ impl Processor {
         // cannot close without patching the vendored source. The read:
         // LibRaw_bigfile_datastream's constructor leaves _fsize unset when
         // stat fails (0.22.2 src/libraw_datastream.cpp:466).
-        let rc = unsafe { raw::libraw_open_file(self.ptr.as_ptr(), c_path.as_ptr()) };
-        check(rc, "libraw_open_file")
+        checked("libraw_open_file", || unsafe {
+            raw::libraw_open_file(self.ptr.as_ptr(), c_path.as_ptr())
+        })
     }
 
     /// Decompresses the raw sensor data.
     pub fn unpack(&mut self) -> Result<(), Error> {
         // SAFETY: self.ptr is a live instance.
-        let rc = unsafe { raw::libraw_unpack(self.ptr.as_ptr()) };
-        check(rc, "libraw_unpack")
+        checked("libraw_unpack", || unsafe {
+            raw::libraw_unpack(self.ptr.as_ptr())
+        })
     }
 
     /// Decompresses only the embedded thumbnail. A file can have a valid
     /// thumbnail even when its raw data is corrupt.
     pub fn unpack_thumb(&mut self) -> Result<(), Error> {
         // SAFETY: self.ptr is a live instance.
-        let rc = unsafe { raw::libraw_unpack_thumb(self.ptr.as_ptr()) };
-        check(rc, "libraw_unpack_thumb")
+        checked("libraw_unpack_thumb", || unsafe {
+            raw::libraw_unpack_thumb(self.ptr.as_ptr())
+        })
     }
 
     /// Whether processing uses the white balance recorded at capture.
@@ -143,8 +148,9 @@ impl Processor {
     /// Demosaics and converts with the parameters set so far.
     pub fn dcraw_process(&mut self) -> Result<(), Error> {
         // SAFETY: self.ptr is a live instance.
-        let rc = unsafe { raw::libraw_dcraw_process(self.ptr.as_ptr()) };
-        check(rc, "libraw_dcraw_process")
+        checked("libraw_dcraw_process", || unsafe {
+            raw::libraw_dcraw_process(self.ptr.as_ptr())
+        })
     }
 
     /// Copies out the processed image. Fails with `OutOfOrderCall` until
@@ -162,7 +168,9 @@ impl Processor {
         }
         let mut errcode = 0;
         // SAFETY: self.ptr is a live instance and errcode a valid int.
-        let ptr = unsafe { raw::libraw_dcraw_make_mem_image(self.ptr.as_ptr(), &mut errcode) };
+        let ptr = timed("libraw_dcraw_make_mem_image", || unsafe {
+            raw::libraw_dcraw_make_mem_image(self.ptr.as_ptr(), &mut errcode)
+        });
         take_mem_image(ptr, errcode, "libraw_dcraw_make_mem_image")
     }
 
@@ -170,7 +178,9 @@ impl Processor {
     pub fn make_mem_thumb(&mut self) -> Result<MemImage, Error> {
         let mut errcode = 0;
         // SAFETY: self.ptr is a live instance and errcode a valid int.
-        let ptr = unsafe { raw::libraw_dcraw_make_mem_thumb(self.ptr.as_ptr(), &mut errcode) };
+        let ptr = timed("libraw_dcraw_make_mem_thumb", || unsafe {
+            raw::libraw_dcraw_make_mem_thumb(self.ptr.as_ptr(), &mut errcode)
+        });
         take_mem_image(ptr, errcode, "libraw_dcraw_make_mem_thumb")
     }
 
@@ -260,6 +270,21 @@ fn libraw_code(errcode: i32) -> i32 {
     }
 }
 
+/// Runs one LibRaw call and logs its name and duration at `debug`.
+fn timed<T>(call: &'static str, f: impl FnOnce() -> T) -> T {
+    let start = Instant::now();
+    let out = f();
+    debug!(call, elapsed = ?start.elapsed(), "libraw call");
+    out
+}
+
+/// Runs one LibRaw call that returns a code, logs it as `timed` does, and
+/// checks the code. The error's location is the caller's line.
+#[track_caller]
+fn checked(call: &'static str, f: impl FnOnce() -> i32) -> Result<(), Error> {
+    check(timed(call, f), call)
+}
+
 /// `Ok` for success, else the `Call` error for `rc`, located at the caller's
 /// line, so the location names the LibRaw call that failed.
 #[track_caller]
@@ -305,6 +330,10 @@ mod tests {
 
         let line = line!() + 1;
         let err = take_mem_image(std::ptr::null_mut(), 0, "test").unwrap_err();
+        assert_eq!(call_line(&err), line);
+
+        let line = line!() + 1;
+        let err = checked("test", || raw::LibRaw_errors_LIBRAW_IO_ERROR).unwrap_err();
         assert_eq!(call_line(&err), line);
     }
 
