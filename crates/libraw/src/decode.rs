@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::error::Error;
+use crate::error::{Error, NoPreviewSnafu, NoThumbnailSnafu};
 use crate::image::ImageBuffer;
 
 /// The abstraction boundary for RAW decoding. Any backend (LibRaw today, a
@@ -25,20 +25,24 @@ pub trait RawDecode: Send + Sync {
     /// memory before decoding begins.
     fn decode(&self, path: &Path) -> Result<ImageBuffer, Error>;
 
-    /// Extracts the camera-generated thumbnail. Default returns Unsupported so
-    /// implementors that lack thumbnail support don't need boilerplate. The
-    /// `let _ = path` suppresses the unused-variable warning without using
-    /// `_path` in the signature, which could mislead implementors into thinking
-    /// the parameter is not meant to be used in overrides.
+    /// Extracts the camera-generated thumbnail. Default returns
+    /// `NoThumbnail` so implementors that lack thumbnail support don't need
+    /// boilerplate.
     fn decode_thumbnail(&self, path: &Path) -> Result<ImageBuffer, Error> {
-        let _ = path;
-        Err(Error::unsupported("thumbnail extraction not supported"))
+        NoThumbnailSnafu {
+            op: "decode_thumbnail",
+            path,
+        }
+        .fail()
     }
 
-    /// Half-resolution decode for fast previews. Same default-returns-Unsupported
-    /// pattern as decode_thumbnail.
+    /// Half-resolution decode for fast previews. Default returns `NoPreview`,
+    /// as decode_thumbnail does.
     fn decode_preview(&self, path: &Path) -> Result<ImageBuffer, Error> {
-        let _ = path;
-        Err(Error::unsupported("preview decode not supported"))
+        NoPreviewSnafu {
+            op: "decode_preview",
+            path,
+        }
+        .fail()
     }
 }

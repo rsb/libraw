@@ -1,126 +1,244 @@
-use rsb_libraw::error::{Error, Kind, ResultExt};
+use std::error::Error as _;
+use std::path::Path;
 
-#[test]
-fn error_io_has_correct_kind() {
-    let err = Error::io("file not found");
-    assert_eq!(err.kind(), Kind::Io);
-    assert_eq!(err.message(), "file not found");
+use rsb_libraw::error::{
+    ConvertSnafu, DimensionsSnafu, Error, FormatSnafu, InitSnafu, JpegSnafu, Kind, MakeImageSnafu,
+    MakeThumbSnafu, NoPreviewSnafu, NoThumbnailSnafu, OpenSnafu, ProcessSnafu,
+    ThumbnailFormatSnafu, UnpackSnafu, UnpackThumbSnafu,
+};
+use rsb_libraw::ffi::{self, ErrorCode};
+use snafu::IntoError;
+
+const OP: &str = "decode";
+
+fn path() -> &'static Path {
+    Path::new("/photos/DSCF0001.RAF")
+}
+
+fn call(code: ErrorCode) -> ffi::Error {
+    ffi::Error::Call {
+        call: "libraw_unpack",
+        code,
+        message: "LibRaw's text".into(),
+    }
+}
+
+fn unpack(source: ffi::Error) -> Error {
+    UnpackSnafu {
+        op: OP,
+        path: path(),
+    }
+    .into_error(source)
+}
+
+fn open(source: ffi::Error, exists: bool) -> Error {
+    OpenSnafu {
+        op: OP,
+        path: path(),
+        exists,
+    }
+    .into_error(source)
+}
+
+fn jpeg() -> jpeg_decoder::Error {
+    jpeg_decoder::Error::Format("bad marker".into())
+}
+
+fn dimensions() -> Error {
+    DimensionsSnafu { what: "10 pixels" }.build()
 }
 
 #[test]
-fn error_unsupported_has_correct_kind() {
-    let err = Error::unsupported("HEIF thumbnail");
-    assert_eq!(err.kind(), Kind::Unsupported);
-    assert_eq!(err.message(), "HEIF thumbnail");
+fn each_libraw_code_gives_the_kind_it_always_gave() {
+    let cases = [
+        (ErrorCode::IoError, Kind::Io),
+        (ErrorCode::InputClosed, Kind::Io),
+        (ErrorCode::InsufficientMemory, Kind::Resource),
+        (ErrorCode::MempoolOverflow, Kind::Resource),
+        (ErrorCode::FileUnsupported, Kind::Unsupported),
+        (ErrorCode::UnsupportedThumbnail, Kind::Unsupported),
+        (ErrorCode::NotImplemented, Kind::Unsupported),
+        (ErrorCode::NoThumbnail, Kind::Unsupported),
+        (ErrorCode::RequestForNonexistentThumbnail, Kind::Unsupported),
+        (ErrorCode::Unspecified, Kind::Corrupt),
+        (ErrorCode::RequestForNonexistentImage, Kind::Corrupt),
+        (ErrorCode::OutOfOrderCall, Kind::Corrupt),
+        (ErrorCode::DataError, Kind::Corrupt),
+        (ErrorCode::CancelledByCallback, Kind::Corrupt),
+        (ErrorCode::BadCrop, Kind::Corrupt),
+        (ErrorCode::TooBig, Kind::Corrupt),
+        (ErrorCode::Other(999999), Kind::Corrupt),
+    ];
+    for (code, kind) in cases {
+        assert_eq!(unpack(call(code)).kind(), kind, "{code:?}");
+    }
 }
 
 #[test]
-fn error_corrupt_has_correct_kind() {
-    let err = Error::corrupt("truncated file");
-    assert_eq!(err.kind(), Kind::Corrupt);
-    assert_eq!(err.message(), "truncated file");
+fn each_ffi_error_gives_the_kind_it_always_gave() {
+    // ffi builds its own Open; a missing file is the way to get one.
+    let open_failed = ffi::Processor::new()
+        .unwrap()
+        .open_file(Path::new("/does/not/exist/4c1d.raf"))
+        .unwrap_err();
+    assert!(matches!(open_failed, ffi::Error::Open { .. }));
+    assert_eq!(open(open_failed, false).kind(), Kind::Io);
+    assert_eq!(open(ffi::Error::PathNul, false).kind(), Kind::Io);
+    let init = InitSnafu {
+        op: OP,
+        path: path(),
+    }
+    .into_error(ffi::Error::Init);
+    assert_eq!(init.kind(), Kind::Resource);
 }
 
 #[test]
-fn error_resource_has_correct_kind() {
-    let err = Error::resource("out of memory");
-    assert_eq!(err.kind(), Kind::Resource);
-    assert_eq!(err.message(), "out of memory");
+fn an_io_error_opening_a_file_that_exists_is_corrupt() {
+    assert_eq!(open(call(ErrorCode::IoError), true).kind(), Kind::Corrupt);
+    assert_eq!(open(call(ErrorCode::IoError), false).kind(), Kind::Io);
+    assert_eq!(
+        open(call(ErrorCode::FileUnsupported), true).kind(),
+        Kind::Unsupported
+    );
 }
 
 #[test]
-fn error_context_prepends_callsite() {
-    let err = Error::corrupt("bad data").context("Decoder::process failed");
-    assert_eq!(err.message(), "Decoder::process failed: bad data");
-    assert_eq!(err.kind(), Kind::Corrupt);
+fn checks_made_by_this_crate_give_their_kind() {
+    let p = path();
+    let jpeg = JpegSnafu { op: OP, path: p }.into_error(jpeg());
+    assert_eq!(jpeg.kind(), Kind::Corrupt);
+    assert_eq!(dimensions().kind(), Kind::Corrupt);
+    let convert = ConvertSnafu { op: OP, path: p }.into_error(dimensions());
+    assert_eq!(convert.kind(), Kind::Corrupt);
+    let unsupported = [
+        FormatSnafu {
+            op: OP,
+            path: p,
+            what: "8-bit",
+        }
+        .build(),
+        ThumbnailFormatSnafu {
+            op: OP,
+            path: p,
+            what: "Bitmap",
+        }
+        .build(),
+        NoThumbnailSnafu { op: OP, path: p }.build(),
+        NoPreviewSnafu { op: OP, path: p }.build(),
+    ];
+    for e in unsupported {
+        assert_eq!(e.kind(), Kind::Unsupported, "{e:?}");
+    }
 }
 
 #[test]
-fn error_context_on_empty_message() {
-    let err = Error::io("").context("open failed");
-    assert_eq!(err.message(), "open failed");
+fn every_variant_has_its_code() {
+    let p = path();
+    let cases = [
+        (
+            InitSnafu { op: OP, path: p }.into_error(ffi::Error::Init),
+            "libraw.init.init",
+        ),
+        (open(ffi::Error::PathNul, false), "libraw.open.path_nul"),
+        (
+            open(call(ErrorCode::FileUnsupported), true),
+            "libraw.open.call",
+        ),
+        (unpack(call(ErrorCode::DataError)), "libraw.unpack.call"),
+        (
+            UnpackThumbSnafu { op: OP, path: p }.into_error(call(ErrorCode::NoThumbnail)),
+            "libraw.unpack_thumb.call",
+        ),
+        (
+            ProcessSnafu { op: OP, path: p }.into_error(call(ErrorCode::DataError)),
+            "libraw.process.call",
+        ),
+        (
+            MakeImageSnafu { op: OP, path: p }.into_error(call(ErrorCode::OutOfOrderCall)),
+            "libraw.make_image.call",
+        ),
+        (
+            MakeThumbSnafu { op: OP, path: p }.into_error(call(ErrorCode::InsufficientMemory)),
+            "libraw.make_thumb.call",
+        ),
+        (
+            JpegSnafu { op: OP, path: p }.into_error(jpeg()),
+            "libraw.jpeg",
+        ),
+        (
+            ConvertSnafu { op: OP, path: p }.into_error(dimensions()),
+            "libraw.convert.dimensions",
+        ),
+        (
+            FormatSnafu {
+                op: OP,
+                path: p,
+                what: "8-bit",
+            }
+            .build(),
+            "libraw.format",
+        ),
+        (
+            ThumbnailFormatSnafu {
+                op: OP,
+                path: p,
+                what: "Bitmap",
+            }
+            .build(),
+            "libraw.thumbnail_format",
+        ),
+        (dimensions(), "libraw.dimensions"),
+        (
+            NoThumbnailSnafu { op: OP, path: p }.build(),
+            "libraw.no_thumbnail",
+        ),
+        (
+            NoPreviewSnafu { op: OP, path: p }.build(),
+            "libraw.no_preview",
+        ),
+    ];
+    for (e, code) in cases {
+        assert_eq!(e.code(), code, "{e:?}");
+    }
 }
 
 #[test]
-fn error_is_kind_returns_true_for_matching() {
-    let err = Error::unsupported("test");
-    assert!(err.is_kind(Kind::Unsupported));
-    assert!(!err.is_kind(Kind::Io));
-    assert!(!err.is_kind(Kind::Corrupt));
-    assert!(!err.is_kind(Kind::Resource));
-}
+fn a_typed_match_reaches_the_libraw_code_and_source_returns_the_cause() {
+    let e = unpack(call(ErrorCode::DataError));
+    assert!(matches!(
+        e,
+        Error::Unpack {
+            source: ffi::Error::Call {
+                code: ErrorCode::DataError,
+                ..
+            },
+            ..
+        }
+    ));
+    let source = e.source().unwrap();
+    assert!(source.downcast_ref::<ffi::Error>().is_some());
 
-#[test]
-fn error_display_includes_kind_message() {
-    let err = Error::corrupt("bad header");
-    let display = format!("{err}");
-    assert!(display.contains("bad header"));
-    assert!(display.contains("corrupt data"));
-}
+    let e = JpegSnafu {
+        op: OP,
+        path: path(),
+    }
+    .into_error(jpeg());
+    let source = e.source().unwrap();
+    assert!(source.downcast_ref::<jpeg_decoder::Error>().is_some());
 
-#[test]
-fn error_display_with_source() {
-    let source = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
-    let err = Error::io("open failed").with_source(source);
-    let display = format!("{err}");
-    assert!(display.contains("caused by"));
-}
-
-#[test]
-fn error_location_captured() {
-    let err = Error::io("test");
-    let loc = err.location();
-    assert!(loc.file().contains("error.rs"));
-}
-
-#[test]
-fn result_ext_context_on_err() {
-    let result: Result<(), Error> = Err(Error::corrupt("inner"));
-    let result = result.context("outer");
-    let err = result.unwrap_err();
-    assert_eq!(err.message(), "outer: inner");
-}
-
-#[test]
-fn result_ext_context_on_ok() {
-    let result: Result<u32, Error> = Ok(42);
-    let result = result.context("should not appear");
-    assert_eq!(result.unwrap(), 42);
+    assert!(
+        NoPreviewSnafu {
+            op: OP,
+            path: path()
+        }
+        .build()
+        .source()
+        .is_none()
+    );
 }
 
 #[test]
 fn error_is_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Error>();
-}
-
-#[test]
-fn kind_display() {
-    assert_eq!(format!("{}", Kind::Io), "i/o failure");
-    assert_eq!(format!("{}", Kind::Unsupported), "unsupported format");
-    assert_eq!(format!("{}", Kind::Corrupt), "corrupt data");
-    assert_eq!(format!("{}", Kind::Resource), "resource exhaustion");
-}
-
-#[test]
-fn error_display_empty_message_shows_kind_only() {
-    let err = Error::io("");
-    let display = format!("{err}");
-    assert_eq!(display, "i/o failure");
-}
-
-#[test]
-fn error_source_returns_some_when_set() {
-    use std::error::Error as StdError;
-    let source = std::io::Error::other("inner");
-    let err = Error::io("outer").with_source(source);
-    assert!(err.source().is_some());
-    assert!(err.source().unwrap().to_string().contains("inner"));
-}
-
-#[test]
-fn error_source_returns_none_when_unset() {
-    use std::error::Error as StdError;
-    let err = Error::io("no source");
-    assert!(err.source().is_none());
 }

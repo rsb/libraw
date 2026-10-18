@@ -1,13 +1,16 @@
-use std::fmt;
-use std::panic::Location;
+use std::path::PathBuf;
+
+use rsb_errors::Loc;
+use rsb_libraw_ffi::{self as ffi, ErrorCode};
+use snafu::prelude::*;
 
 // ---------------------------------------------------------------------------
 // Kind — the four failure categories that downstream code can match on
 // ---------------------------------------------------------------------------
 
 /// Classifies every error into one of four categories so callers can decide
-/// how to respond without parsing message strings. The variants map directly
-/// to the failure modes a RAW-processing pipeline encounters:
+/// how to respond without parsing message strings. Derived from the variant
+/// and, for LibRaw failures, from LibRaw's code; see [`Error::kind`].
 ///
 /// - `Io` — the file could not be read at all (missing, permissions, device).
 /// - `Unsupported` — the file was read but its format is not handled.
@@ -22,198 +25,210 @@ pub enum Kind {
     Resource,
 }
 
-impl Kind {
-    /// Returns a short, human-readable label for this category. Used as the
-    /// trailing phrase in `Display` output (e.g., "open failed: i/o failure").
-    pub fn default_message(&self) -> &'static str {
-        match self {
-            Kind::Io => "i/o failure",
-            Kind::Unsupported => "unsupported format",
-            Kind::Corrupt => "corrupt data",
-            Kind::Resource => "resource exhaustion",
-        }
-    }
-}
-
-impl fmt::Display for Kind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.default_message())
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Error — a categorized, located, chainable error value
+// Error — one variant per failure the crate reports
 // ---------------------------------------------------------------------------
 
 /// The crate's single error type. Every fallible operation returns this.
 ///
-/// Design choices:
-/// - `kind` enables programmatic matching without downcasting.
-/// - `message` carries human-readable detail (may be empty).
-/// - `source` optionally wraps an underlying std::error::Error for chaining.
-/// - `location` captures the call site via `#[track_caller]`, so logs show
-///   where the error was constructed without needing a full backtrace.
+/// Each variant names one failure. `op` is the public method that failed
+/// (`decode`, `decode_preview`, `decode_thumbnail`) and `path` the file it
+/// was given, so `{e}` reads as one line from the method to LibRaw's text:
+/// `decode /photos/DSCF0001.RAF: open: cannot open file: No such file or
+/// directory (os error 2)`, with ` (at file:line)` after each wrapping step
+/// unless `rsb_errors::show_locations(false)`.
 ///
-/// The type is `Send + Sync` so it can cross thread boundaries (e.g., when
-/// decoding is dispatched to a thread pool).
-#[derive(Debug)]
-pub struct Error {
-    kind: Kind,
-    message: String,
-    source: Option<Box<dyn std::error::Error + Send + Sync>>,
-    location: &'static Location<'static>,
+/// `Send + Sync`, so it can cross thread boundaries.
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
+pub enum Error {
+    /// LibRaw could not create its state.
+    #[snafu(display("{op} {}: init{location}: {source}", path.display()))]
+    Init {
+        op: &'static str,
+        path: PathBuf,
+        source: ffi::Error,
+        #[snafu(implicit)]
+        location: Loc,
+    },
+    /// The file could not be opened or identified. `exists` is whether the
+    /// path existed when the open failed: LibRaw reports a file too short to
+    /// identify as an I/O error, and an existing file makes that `Corrupt`.
+    #[snafu(display("{op} {}: open{location}: {source}", path.display()))]
+    Open {
+        op: &'static str,
+        path: PathBuf,
+        exists: bool,
+        source: ffi::Error,
+        #[snafu(implicit)]
+        location: Loc,
+    },
+    /// LibRaw could not unpack the raw data.
+    #[snafu(display("{op} {}: unpack{location}: {source}", path.display()))]
+    Unpack {
+        op: &'static str,
+        path: PathBuf,
+        source: ffi::Error,
+        #[snafu(implicit)]
+        location: Loc,
+    },
+    /// LibRaw could not unpack the embedded thumbnail.
+    #[snafu(display("{op} {}: unpack thumbnail{location}: {source}", path.display()))]
+    UnpackThumb {
+        op: &'static str,
+        path: PathBuf,
+        source: ffi::Error,
+        #[snafu(implicit)]
+        location: Loc,
+    },
+    /// LibRaw could not demosaic and process the raw data.
+    #[snafu(display("{op} {}: process{location}: {source}", path.display()))]
+    Process {
+        op: &'static str,
+        path: PathBuf,
+        source: ffi::Error,
+        #[snafu(implicit)]
+        location: Loc,
+    },
+    /// LibRaw could not hand over the processed image.
+    #[snafu(display("{op} {}: make image{location}: {source}", path.display()))]
+    MakeImage {
+        op: &'static str,
+        path: PathBuf,
+        source: ffi::Error,
+        #[snafu(implicit)]
+        location: Loc,
+    },
+    /// LibRaw could not hand over the thumbnail.
+    #[snafu(display("{op} {}: make thumbnail{location}: {source}", path.display()))]
+    MakeThumb {
+        op: &'static str,
+        path: PathBuf,
+        source: ffi::Error,
+        #[snafu(implicit)]
+        location: Loc,
+    },
+    /// The embedded JPEG thumbnail could not be decoded.
+    #[snafu(display("{op} {}: decode JPEG thumbnail{location}: {source}", path.display()))]
+    Jpeg {
+        op: &'static str,
+        path: PathBuf,
+        source: jpeg_decoder::Error,
+        #[snafu(implicit)]
+        location: Loc,
+    },
+    /// The pixels LibRaw or the JPEG decoder produced do not fit the image
+    /// they claim to be. The source is a [`Error::Dimensions`].
+    #[snafu(display("{op} {}: convert pixels{location}: {source}", path.display()))]
+    Convert {
+        op: &'static str,
+        path: PathBuf,
+        #[snafu(source(from(Error, Box::new)))]
+        source: Box<Error>,
+        #[snafu(implicit)]
+        location: Loc,
+    },
+    /// The processed image is not the 16-bit RGB bitmap this crate asked for.
+    #[snafu(display("{op} {}: output format: {what}", path.display()))]
+    Format {
+        op: &'static str,
+        path: PathBuf,
+        what: String,
+    },
+    /// The thumbnail is in a format this crate does not convert.
+    #[snafu(display("{op} {}: thumbnail format: {what}", path.display()))]
+    ThumbnailFormat {
+        op: &'static str,
+        path: PathBuf,
+        what: String,
+    },
+    /// Pixel data does not match the width and height given with it.
+    /// Returned by the `ImageBuffer` constructors, which know no path.
+    #[snafu(display("image dimensions: {what}"))]
+    Dimensions { what: String },
+    /// The decoder does not extract thumbnails: `RawDecode`'s default.
+    #[snafu(display("{op} {}: thumbnails not supported by this decoder", path.display()))]
+    NoThumbnail { op: &'static str, path: PathBuf },
+    /// The decoder does not make previews: `RawDecode`'s default.
+    #[snafu(display("{op} {}: previews not supported by this decoder", path.display()))]
+    NoPreview { op: &'static str, path: PathBuf },
 }
 
 impl Error {
-    // -------------------------------------------------------------------------
-    // Constructors — one per Kind, all #[track_caller] so Location is correct
-    // -------------------------------------------------------------------------
-
-    /// Creates an I/O error. Use when the file system or device layer fails
-    /// (file not found, permission denied, read interrupted).
-    #[track_caller]
-    pub fn io(msg: impl Into<String>) -> Self {
-        Self {
-            kind: Kind::Io,
-            message: msg.into(),
-            source: None,
-            location: Location::caller(),
-        }
-    }
-
-    /// Creates an unsupported-format error. Use when the file is readable but
-    /// its codec, pixel layout, or container is not handled by this crate.
-    #[track_caller]
-    pub fn unsupported(msg: impl Into<String>) -> Self {
-        Self {
-            kind: Kind::Unsupported,
-            message: msg.into(),
-            source: None,
-            location: Location::caller(),
-        }
-    }
-
-    /// Creates a corrupt-data error. Use when the file header or payload
-    /// violates format invariants (bad magic, truncated segments, impossible
-    /// dimensions).
-    #[track_caller]
-    pub fn corrupt(msg: impl Into<String>) -> Self {
-        Self {
-            kind: Kind::Corrupt,
-            message: msg.into(),
-            source: None,
-            location: Location::caller(),
-        }
-    }
-
-    /// Creates a resource-exhaustion error. Use when memory allocation or
-    /// internal pool limits are exceeded.
-    #[track_caller]
-    pub fn resource(msg: impl Into<String>) -> Self {
-        Self {
-            kind: Kind::Resource,
-            message: msg.into(),
-            source: None,
-            location: Location::caller(),
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Builder methods
-    // -------------------------------------------------------------------------
-
-    /// Attaches a lower-level error as the cause. Appears in Display output
-    /// as "caused by: …" and is returned by `std::error::Error::source()`.
-    pub fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
-        self.source = Some(Box::new(source));
-        self
-    }
-
-    /// Prepends a contextual callsite description to the message, producing
-    /// "context: original message". If the original message is empty, the
-    /// context becomes the entire message. Kind and location are preserved
-    /// from the original error — context describes *where* the error surfaced,
-    /// not *what* went wrong.
-    pub fn context(self, ctx: impl Into<String>) -> Self {
-        let message = if self.message.is_empty() {
-            ctx.into()
-        } else {
-            format!("{}: {}", ctx.into(), self.message)
-        };
-
-        Self {
-            kind: self.kind,
-            message,
-            source: self.source,
-            location: self.location,
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Accessors
-    // -------------------------------------------------------------------------
-
-    /// Returns the error category.
+    /// The category a caller branches on. LibRaw failures take theirs from
+    /// LibRaw's code; an unrecognised code is `Corrupt`, since bad data is
+    /// a safer guess than I/O or resources.
     pub fn kind(&self) -> Kind {
-        self.kind
-    }
-
-    /// Convenience predicate for matching a specific category.
-    pub fn is_kind(&self, kind: Kind) -> bool {
-        self.kind == kind
-    }
-
-    /// Returns the human-readable detail string (may be empty).
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-
-    /// Returns the source-code location where this error was constructed.
-    pub fn location(&self) -> &'static Location<'static> {
-        self.location
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Display — "message: kind\n  caused by: source"
-// ---------------------------------------------------------------------------
-
-impl fmt::Display for Error {
-    /// Format: `"{message}: {kind}"` when message is non-empty, otherwise just
-    /// `"{kind}"`. If a source is attached, appends `"\n  caused by: {source}"`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.message.is_empty() {
-            write!(f, "{}", self.kind.default_message())?;
-        } else {
-            write!(f, "{}: {}", self.message, self.kind.default_message())?;
+        match self {
+            Error::Open {
+                exists: true,
+                source:
+                    ffi::Error::Call {
+                        code: ErrorCode::IoError,
+                        ..
+                    },
+                ..
+            } => Kind::Corrupt,
+            Error::Init { source, .. }
+            | Error::Open { source, .. }
+            | Error::Unpack { source, .. }
+            | Error::UnpackThumb { source, .. }
+            | Error::Process { source, .. }
+            | Error::MakeImage { source, .. }
+            | Error::MakeThumb { source, .. } => ffi_kind(source),
+            Error::Convert { source, .. } => source.kind(),
+            Error::Jpeg { .. } | Error::Dimensions { .. } => Kind::Corrupt,
+            Error::Format { .. }
+            | Error::ThumbnailFormat { .. }
+            | Error::NoThumbnail { .. }
+            | Error::NoPreview { .. } => Kind::Unsupported,
         }
-        if let Some(source) = &self.source {
-            write!(f, "\n  caused by: {source}")?;
+    }
+
+    /// The variant's path, dotted and prefixed through each layer. Codes are
+    /// API: add one, never rename one.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Error::Init { .. } => "libraw.init.init",
+            Error::Open { source, .. } => match source {
+                ffi::Error::Open { .. } => "libraw.open.open",
+                ffi::Error::PathNul => "libraw.open.path_nul",
+                #[cfg(not(unix))]
+                ffi::Error::PathNotUtf8 => "libraw.open.path_not_utf8",
+                ffi::Error::Call { .. } => "libraw.open.call",
+                ffi::Error::Init => "libraw.open.init",
+            },
+            Error::Unpack { .. } => "libraw.unpack.call",
+            Error::UnpackThumb { .. } => "libraw.unpack_thumb.call",
+            Error::Process { .. } => "libraw.process.call",
+            Error::MakeImage { .. } => "libraw.make_image.call",
+            Error::MakeThumb { .. } => "libraw.make_thumb.call",
+            Error::Jpeg { .. } => "libraw.jpeg",
+            Error::Convert { .. } => "libraw.convert.dimensions",
+            Error::Format { .. } => "libraw.format",
+            Error::ThumbnailFormat { .. } => "libraw.thumbnail_format",
+            Error::Dimensions { .. } => "libraw.dimensions",
+            Error::NoThumbnail { .. } => "libraw.no_thumbnail",
+            Error::NoPreview { .. } => "libraw.no_preview",
         }
-        Ok(())
     }
 }
 
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source
-            .as_ref()
-            .map(|s| s.as_ref() as &(dyn std::error::Error + 'static))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ResultExt — ergonomic .context() on Result<T, Error>
-// ---------------------------------------------------------------------------
-
-/// Extension trait that adds `.context("msg")` to `Result<T, Error>`, mirroring
-/// the pattern from anyhow/eyre but staying within this crate's error type.
-pub trait ResultExt<T> {
-    fn context(self, ctx: impl Into<String>) -> Result<T, Error>;
-}
-
-impl<T> ResultExt<T> for Result<T, Error> {
-    fn context(self, ctx: impl Into<String>) -> Result<T, Error> {
-        self.map_err(|e| e.context(ctx))
+fn ffi_kind(err: &ffi::Error) -> Kind {
+    match err {
+        ffi::Error::Init => Kind::Resource,
+        ffi::Error::Open { .. } | ffi::Error::PathNul => Kind::Io,
+        #[cfg(not(unix))]
+        ffi::Error::PathNotUtf8 => Kind::Io,
+        ffi::Error::Call { code, .. } => match code {
+            ErrorCode::IoError | ErrorCode::InputClosed => Kind::Io,
+            ErrorCode::InsufficientMemory | ErrorCode::MempoolOverflow => Kind::Resource,
+            ErrorCode::FileUnsupported
+            | ErrorCode::UnsupportedThumbnail
+            | ErrorCode::NotImplemented
+            | ErrorCode::NoThumbnail
+            | ErrorCode::RequestForNonexistentThumbnail => Kind::Unsupported,
+            _ => Kind::Corrupt,
+        },
     }
 }
