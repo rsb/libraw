@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use rsb_libraw::error::Kind;
+use rsb_libraw::error::{Error, Kind};
 use rsb_libraw::{LibRawAdapter, RawDecode};
 
 fn missing_path() -> PathBuf {
@@ -117,8 +117,13 @@ fn decode_preview_path_with_interior_null_returns_io() {
 struct DecodeOnly;
 
 impl RawDecode for DecodeOnly {
-    fn decode(&self, _path: &Path) -> Result<rsb_libraw::ImageBuffer, rsb_libraw::Error> {
-        Err(rsb_libraw::Error::unsupported("stub"))
+    fn decode(&self, path: &Path) -> Result<rsb_libraw::ImageBuffer, rsb_libraw::Error> {
+        rsb_libraw::error::FormatSnafu {
+            op: "decode",
+            path,
+            what: "stub",
+        }
+        .fail()
     }
 }
 
@@ -129,7 +134,7 @@ fn default_decode_thumbnail_returns_unsupported() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.kind(), Kind::Unsupported);
-    assert!(err.message().contains("thumbnail"));
+    assert!(matches!(err, Error::NoThumbnail { .. }), "{err:?}");
 }
 
 #[test]
@@ -139,5 +144,5 @@ fn default_decode_preview_returns_unsupported() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.kind(), Kind::Unsupported);
-    assert!(err.message().contains("preview"));
+    assert!(matches!(err, Error::NoPreview { .. }), "{err:?}");
 }

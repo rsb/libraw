@@ -1,0 +1,11 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+rsb-errors = { workspace = true, features = ["check"] }
+
+[lints]
+workspace = true

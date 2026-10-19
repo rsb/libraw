@@ -12,7 +12,9 @@ thumbnail). No consumer yet; Lumen will take it as a git dependency once
 it provides linear camera RGB and metadata.
 
 Standards shared with the rsb apps live in `../rules`. The rules this
-repository enforces, and their checks, are in `engineering/`.
+repository enforces, and their checks, are in `engineering/`: `errors.md`,
+`panics.md` and `logging.md` point at the shared standards, and
+`cargo xtask errors` runs their checks.
 
 ## Architecture
 
@@ -22,7 +24,7 @@ Two crates, one boundary:
 ┌─────────────────────────────────────────────────────┐
 │  rsb-libraw              (pure Rust, fast build)   │
 │                                                     │
-│  pub mod error   — Kind, Error, ResultExt           │
+│  pub mod error   — Error (snafu), kind(), code()   │
 │  pub mod image   — Pixel, ImageBuffer               │
 │  pub mod decode  — RawDecode trait                  │
 │  mod adapter     — LibRawAdapter                    │
@@ -37,7 +39,7 @@ Two crates, one boundary:
 │  src/processor.rs — Processor, MemImage: the safe   │
 │                    API; every `unsafe` block lives  │
 │                    in this crate                    │
-│  src/error.rs    — Error, ErrorCode (thiserror)     │
+│  src/error.rs    — Error (snafu), ErrorCode         │
 │  src/lib.rs      — keeps generated bindings private │
 │  vendor/         — LibRaw 0.22.2 source tree        │
 └─────────────────────────────────────────────────────┘
@@ -103,7 +105,23 @@ display(&full);
 
 ### Error handling
 
-Errors are classified by recovery action:
+`rsb_libraw::Error` has one variant per failure. Its `Display` is the
+whole story on one line, from the public method to LibRaw's text, with
+the file and line of each step:
+
+```
+decode /photos/DSCF0001.RAF: open (at crates/libraw/src/adapter.rs:29): cannot open file (at crates/ffi/src/processor.rs:91): No such file or directory (os error 2)
+```
+
+`rsb_errors::show_locations(false)` drops the `(at …)` segments, for a
+line that goes into a record or a golden file:
+
+```
+decode /photos/DSCF0001.RAF: open: cannot open file: No such file or directory (os error 2)
+```
+
+A caller branches on `e.kind()`, the recovery category, and reports
+`e.code()`, a stable dotted name such as `libraw.open.call`:
 
 ```rust
 use rsb_libraw::{LibRawAdapter, RawDecode};
@@ -114,11 +132,22 @@ let adapter = LibRawAdapter;
 match adapter.decode(path) {
   Ok(image) => process(image),
   Err(e) => match e.kind() {
-    Kind::Io          => eprintln!("file not found or bad path: {e}"),
-    Kind::Unsupported => eprintln!("camera/format not handled: {e}"),
-    Kind::Corrupt     => eprintln!("file data is malformed: {e}"),
-    Kind::Resource    => eprintln!("out of memory: {e}"),
+    Kind::Io          => skip(path, e.code(), &e),
+    Kind::Unsupported => skip(path, e.code(), &e),
+    Kind::Corrupt     => reject(path, e.code(), &e),
+    Kind::Resource    => back_off(e),
   }
+}
+```
+
+A typed match reaches LibRaw's own code through the re-exported `ffi`
+layer, without downcasting:
+
+```rust
+use rsb_libraw::{Error, ffi};
+
+if let Err(Error::Unpack { source: ffi::Error::Call { code, .. }, .. }) = result {
+  // code: ffi::ErrorCode
 }
 ```
 
@@ -166,6 +195,10 @@ let image = import_raw(&*decoder, Path::new("photo.arw"))?;
 ```
 
 ## Error classification
+
+`Error::kind()` derives the category from the variant and, for LibRaw
+failures, from LibRaw's code. An I/O error from LibRaw on a file that
+exists is `Corrupt`: the file opened, but is too short to identify.
 
 | Kind | Meaning | Caller action |
 |------|---------|---------------|

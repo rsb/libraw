@@ -1,9 +1,13 @@
 use std::path::Path;
 
-use rsb_libraw_ffi::{self as ffi, ErrorCode, ImageFormat, MemImage, OutputBps, OutputColor};
+use rsb_libraw_ffi::{self as ffi, ImageFormat, MemImage, OutputBps, OutputColor};
+use snafu::prelude::*;
 
 use crate::decode::RawDecode;
-use crate::error::{self as fail, ResultExt};
+use crate::error::{
+    ConvertSnafu, Error, FormatSnafu, InitSnafu, JpegSnafu, MakeImageSnafu, MakeThumbSnafu,
+    OpenSnafu, ProcessSnafu, ThumbnailFormatSnafu, UnpackSnafu, UnpackThumbSnafu,
+};
 use crate::image::ImageBuffer;
 
 // ---------------------------------------------------------------------------
@@ -19,81 +23,53 @@ pub struct LibRawAdapter;
 impl RawDecode for LibRawAdapter {
     /// Full-resolution decode: open → unpack → configure sRGB 16-bit →
     /// demosaic/process → extract image.
-    fn decode(&self, path: &Path) -> Result<ImageBuffer, fail::Error> {
-        let mut processor = ffi::Processor::new()
-            .map_err(from_ffi)
-            .context("LibRawAdapter::decode init failed")?;
-
-        open_file(&mut processor, path).context("LibRawAdapter::decode open failed")?;
-
-        processor
-            .unpack()
-            .map_err(from_ffi)
-            .context("LibRawAdapter::decode unpack failed")?;
-
+    fn decode(&self, path: &Path) -> Result<ImageBuffer, Error> {
+        let op = "decode";
+        let mut processor = ffi::Processor::new().context(InitSnafu { op, path })?;
+        open_file(&mut processor, op, path)?;
+        processor.unpack().context(UnpackSnafu { op, path })?;
         configure_output_srgb16(&mut processor);
-
         processor
             .dcraw_process()
-            .map_err(from_ffi)
-            .context("LibRawAdapter::decode process failed")?;
-
-        processor
+            .context(ProcessSnafu { op, path })?;
+        let image = processor
             .make_mem_image()
-            .map_err(from_ffi)
-            .and_then(rgb16_image)
-            .context("LibRawAdapter::decode make_mem_image failed")
+            .context(MakeImageSnafu { op, path })?;
+        rgb16_image(image, op, path)
     }
 
     /// Extracts the camera-generated thumbnail. No processing step — thumbnails
     /// are pre-rendered by the camera firmware.
-    fn decode_thumbnail(&self, path: &Path) -> Result<ImageBuffer, fail::Error> {
-        let mut processor = ffi::Processor::new()
-            .map_err(from_ffi)
-            .context("LibRawAdapter::decode_thumbnail init failed")?;
-
-        open_file(&mut processor, path).context("LibRawAdapter::decode_thumbnail open failed")?;
-
+    fn decode_thumbnail(&self, path: &Path) -> Result<ImageBuffer, Error> {
+        let op = "decode_thumbnail";
+        let mut processor = ffi::Processor::new().context(InitSnafu { op, path })?;
+        open_file(&mut processor, op, path)?;
         processor
             .unpack_thumb()
-            .map_err(from_ffi)
-            .context("LibRawAdapter::decode_thumbnail unpack_thumb failed")?;
-
-        processor
+            .context(UnpackThumbSnafu { op, path })?;
+        let image = processor
             .make_mem_thumb()
-            .map_err(from_ffi)
-            .and_then(thumbnail_image)
-            .context("LibRawAdapter::decode_thumbnail make_mem_thumb failed")
+            .context(MakeThumbSnafu { op, path })?;
+        thumbnail_image(image, op, path)
     }
 
     /// Half-resolution decode for fast previews. Same pipeline as decode but
     /// with half_size enabled — each Bayer quad becomes one pixel instead of
     /// four, trading resolution for speed.
-    fn decode_preview(&self, path: &Path) -> Result<ImageBuffer, fail::Error> {
-        let mut processor = ffi::Processor::new()
-            .map_err(from_ffi)
-            .context("LibRawAdapter::decode_preview init failed")?;
-
-        open_file(&mut processor, path).context("LibRawAdapter::decode_preview open failed")?;
-
-        processor
-            .unpack()
-            .map_err(from_ffi)
-            .context("LibRawAdapter::decode_preview unpack failed")?;
-
+    fn decode_preview(&self, path: &Path) -> Result<ImageBuffer, Error> {
+        let op = "decode_preview";
+        let mut processor = ffi::Processor::new().context(InitSnafu { op, path })?;
+        open_file(&mut processor, op, path)?;
+        processor.unpack().context(UnpackSnafu { op, path })?;
         processor.set_half_size(true);
         configure_output_srgb16(&mut processor);
-
         processor
             .dcraw_process()
-            .map_err(from_ffi)
-            .context("LibRawAdapter::decode_preview process failed")?;
-
-        processor
+            .context(ProcessSnafu { op, path })?;
+        let image = processor
             .make_mem_image()
-            .map_err(from_ffi)
-            .and_then(rgb16_image)
-            .context("LibRawAdapter::decode_preview make_mem_image failed")
+            .context(MakeImageSnafu { op, path })?;
+        rgb16_image(image, op, path)
     }
 }
 
@@ -112,42 +88,54 @@ fn configure_output_srgb16(processor: &mut ffi::Processor) {
     processor.set_output_bps(OutputBps::Sixteen);
 }
 
-/// Opens the file, applying the open-file classification below.
-fn open_file(processor: &mut ffi::Processor, path: &Path) -> Result<(), fail::Error> {
-    processor
-        .open_file(path)
-        .map_err(|e| classify_open_file_error(e, path.exists()))
+/// Opens the file, recording whether the path exists for `Error::kind`.
+/// `Processor::open_file` has already opened the file for reading, so an
+/// I/O error from LibRaw on a file that still exists means the file is too
+/// short to identify. The race (the file deleted between LibRaw's open and
+/// the `exists` check) is accepted as best-effort.
+#[track_caller]
+fn open_file(processor: &mut ffi::Processor, op: &'static str, path: &Path) -> Result<(), Error> {
+    let result = processor.open_file(path);
+    let exists = result.is_err() && path.exists();
+    result.context(OpenSnafu { op, path, exists })
 }
 
 /// Converts a processed full image. Unlike thumbnails, the output format is
 /// strictly validated: we configured 16-bit 3-channel sRGB, so anything else
 /// indicates a LibRaw bug or a pathological image.
-fn rgb16_image(image: MemImage) -> Result<ImageBuffer, fail::Error> {
-    if image.format != ImageFormat::Bitmap {
-        return Err(fail::Error::unsupported(
-            "decoded image is not bitmap format",
-        ));
-    }
-    if image.bits != 16 {
-        return Err(fail::Error::unsupported(format!(
-            "expected 16-bit output, got {}-bit",
-            image.bits
-        )));
-    }
-    if image.colors != 3 {
-        return Err(fail::Error::unsupported(format!(
-            "expected 3-channel RGB, got {} channels",
-            image.colors
-        )));
-    }
+fn rgb16_image(image: MemImage, op: &'static str, path: &Path) -> Result<ImageBuffer, Error> {
+    ensure!(
+        image.format == ImageFormat::Bitmap,
+        FormatSnafu {
+            op,
+            path,
+            what: format!("{:?}, not a bitmap", image.format),
+        }
+    );
+    ensure!(
+        image.bits == 16,
+        FormatSnafu {
+            op,
+            path,
+            what: format!("{}-bit, not 16-bit", image.bits),
+        }
+    );
+    ensure!(
+        image.colors == 3,
+        FormatSnafu {
+            op,
+            path,
+            what: format!("{} channels, not 3", image.colors),
+        }
+    );
     ImageBuffer::from_rgb16(&image.data, image.width, image.height)
-        .context("LibRaw decode pixel conversion failed")
+        .context(ConvertSnafu { op, path })
 }
 
 /// Converts an extracted thumbnail. Thumbnails can be JPEG (most cameras),
 /// 8-bit bitmap, or 16-bit bitmap — this handles all three and returns
-/// Unsupported for anything else.
-fn thumbnail_image(image: MemImage) -> Result<ImageBuffer, fail::Error> {
+/// `ThumbnailFormat` for anything else.
+fn thumbnail_image(image: MemImage, op: &'static str, path: &Path) -> Result<ImageBuffer, Error> {
     let MemImage {
         format,
         width,
@@ -157,98 +145,63 @@ fn thumbnail_image(image: MemImage) -> Result<ImageBuffer, fail::Error> {
         data,
     } = image;
     match format {
-        ImageFormat::Jpeg => decode_jpeg_thumbnail(&data),
+        ImageFormat::Jpeg => decode_jpeg_thumbnail(&data, op, path),
         ImageFormat::Bitmap if bits == 8 && colors == 3 => {
-            ImageBuffer::from_rgb8(&data, width, height)
-                .context("thumbnail bitmap RGB8 conversion failed")
+            ImageBuffer::from_rgb8(&data, width, height).context(ConvertSnafu { op, path })
         }
         ImageFormat::Bitmap if bits == 16 && colors == 3 => {
-            ImageBuffer::from_rgb16(&data, width, height)
-                .context("thumbnail bitmap RGB16 conversion failed")
+            ImageBuffer::from_rgb16(&data, width, height).context(ConvertSnafu { op, path })
         }
-        ImageFormat::Bitmap => Err(fail::Error::unsupported(format!(
-            "thumbnail bitmap format: {bits}-bit, {colors} channels"
-        ))),
-        other => Err(fail::Error::unsupported(format!(
-            "thumbnail format {other:?}"
-        ))),
+        ImageFormat::Bitmap => ThumbnailFormatSnafu {
+            op,
+            path,
+            what: format!("{bits}-bit bitmap with {colors} channels"),
+        }
+        .fail(),
+        other => ThumbnailFormatSnafu {
+            op,
+            path,
+            what: format!("{other:?}"),
+        }
+        .fail(),
     }
 }
 
 /// Decodes an embedded JPEG thumbnail into an ImageBuffer. Most cameras store
 /// thumbnails as JPEGs; this normalizes them into the same pixel format as
 /// full decodes so downstream code doesn't need to know the original encoding.
-fn decode_jpeg_thumbnail(jpeg_data: &[u8]) -> Result<ImageBuffer, fail::Error> {
+fn decode_jpeg_thumbnail(
+    jpeg_data: &[u8],
+    op: &'static str,
+    path: &Path,
+) -> Result<ImageBuffer, Error> {
     use jpeg_decoder::{Decoder, PixelFormat};
 
     let mut decoder = Decoder::new(jpeg_data);
-    let pixels = decoder
-        .decode()
-        .map_err(|e| fail::Error::corrupt(format!("JPEG thumbnail decode failed: {e}")))?;
-
-    let info = decoder
-        .info()
-        .ok_or_else(|| fail::Error::corrupt("JPEG thumbnail decoded but produced no image info"))?;
+    let pixels = decoder.decode().context(JpegSnafu { op, path })?;
+    let info = decoder.info().context(ThumbnailFormatSnafu {
+        op,
+        path,
+        what: "JPEG with no image info",
+    })?;
 
     match info.pixel_format {
         PixelFormat::RGB24 => {
             ImageBuffer::from_rgb8(&pixels, info.width as u32, info.height as u32)
-                .context("JPEG thumbnail pixel conversion failed")
+                .context(ConvertSnafu { op, path })
         }
         // Grayscale thumbnails (some older cameras): expand each gray value to R=G=B.
         PixelFormat::L8 => {
             let rgb: Vec<u8> = pixels.iter().flat_map(|&g| [g, g, g]).collect();
             ImageBuffer::from_rgb8(&rgb, info.width as u32, info.height as u32)
-                .context("JPEG thumbnail grayscale conversion failed")
+                .context(ConvertSnafu { op, path })
         }
-        other => Err(fail::Error::unsupported(format!(
-            "JPEG thumbnail pixel format: {other:?}"
-        ))),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Error classification
-// ---------------------------------------------------------------------------
-
-/// TOCTOU heuristic for open_file failures. `Processor::open_file` has
-/// already opened the file for reading, so if LibRaw then reports an I/O
-/// error and the file still exists, the error is reclassified as Corrupt:
-/// LibRaw reports a file too short to identify this way. The race condition
-/// (file deleted between LibRaw's open and our exists check) is accepted as
-/// best-effort.
-fn classify_open_file_error(err: ffi::Error, path_exists: bool) -> fail::Error {
-    match err {
-        ffi::Error::Call {
-            code: ErrorCode::IoError,
-            ..
-        } if path_exists => fail::Error::corrupt(err.to_string()),
-        other => from_ffi(other),
-    }
-}
-
-/// Maps a LibRaw failure to the crate's Kind. The catch-all default is
-/// Corrupt: if LibRaw returns an unrecognized code, it's safer to assume the
-/// file's data is bad than to blame I/O or resources.
-fn from_ffi(err: ffi::Error) -> fail::Error {
-    let detail = err.to_string();
-    match err {
-        ffi::Error::Init => fail::Error::resource(detail),
-        ffi::Error::Open(_) | ffi::Error::PathNul => fail::Error::io(detail),
-        #[cfg(not(unix))]
-        ffi::Error::PathNotUtf8 => fail::Error::io(detail),
-        ffi::Error::Call { code, .. } => match code {
-            ErrorCode::IoError | ErrorCode::InputClosed => fail::Error::io(detail),
-            ErrorCode::InsufficientMemory | ErrorCode::MempoolOverflow => {
-                fail::Error::resource(detail)
-            }
-            ErrorCode::FileUnsupported
-            | ErrorCode::UnsupportedThumbnail
-            | ErrorCode::NotImplemented
-            | ErrorCode::NoThumbnail
-            | ErrorCode::RequestForNonexistentThumbnail => fail::Error::unsupported(detail),
-            _ => fail::Error::corrupt(detail),
-        },
+        other => ThumbnailFormatSnafu {
+            op,
+            path,
+            what: format!("JPEG in {other:?}"),
+        }
+        .fail(),
     }
 }
 
@@ -257,82 +210,17 @@ mod tests {
     use super::*;
     use crate::error::Kind;
 
-    fn call(code: ErrorCode) -> ffi::Error {
-        ffi::Error::Call {
-            call: "test",
-            code,
-            message: String::new(),
-        }
-    }
-
     #[test]
     fn decode_jpeg_thumbnail_corrupt_data() {
-        let result = decode_jpeg_thumbnail(b"not a jpeg at all");
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), Kind::Corrupt);
-    }
-
-    #[test]
-    fn decode_jpeg_thumbnail_empty_data() {
-        let result = decode_jpeg_thumbnail(b"");
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), Kind::Corrupt);
-    }
-
-    #[test]
-    fn from_ffi_maps_io_codes() {
-        assert_eq!(from_ffi(call(ErrorCode::IoError)).kind(), Kind::Io);
-        assert_eq!(from_ffi(call(ErrorCode::InputClosed)).kind(), Kind::Io);
-    }
-
-    #[test]
-    fn from_ffi_maps_resource_codes() {
-        assert_eq!(
-            from_ffi(call(ErrorCode::InsufficientMemory)).kind(),
-            Kind::Resource
-        );
-        assert_eq!(
-            from_ffi(call(ErrorCode::MempoolOverflow)).kind(),
-            Kind::Resource
-        );
-    }
-
-    #[test]
-    fn from_ffi_maps_unsupported_codes() {
-        for code in [
-            ErrorCode::FileUnsupported,
-            ErrorCode::UnsupportedThumbnail,
-            ErrorCode::NotImplemented,
-            ErrorCode::NoThumbnail,
-            ErrorCode::RequestForNonexistentThumbnail,
-        ] {
-            assert_eq!(from_ffi(call(code)).kind(), Kind::Unsupported, "{code:?}");
-        }
-    }
-
-    #[test]
-    fn from_ffi_unknown_code_maps_to_corrupt() {
-        assert_eq!(
-            from_ffi(call(ErrorCode::Other(999999))).kind(),
-            Kind::Corrupt
-        );
-    }
-
-    #[test]
-    fn classify_open_file_io_error_with_existing_path_returns_corrupt() {
-        let err = classify_open_file_error(call(ErrorCode::IoError), true);
+        let err = decode_jpeg_thumbnail(b"not a jpeg at all", "decode_thumbnail", Path::new("x"))
+            .unwrap_err();
+        assert!(matches!(err, Error::Jpeg { .. }), "{err:?}");
         assert_eq!(err.kind(), Kind::Corrupt);
     }
 
     #[test]
-    fn classify_open_file_io_error_with_missing_path_returns_io() {
-        let err = classify_open_file_error(call(ErrorCode::IoError), false);
-        assert_eq!(err.kind(), Kind::Io);
-    }
-
-    #[test]
-    fn classify_open_file_non_io_error_ignores_path_exists() {
-        let err = classify_open_file_error(call(ErrorCode::FileUnsupported), true);
-        assert_eq!(err.kind(), Kind::Unsupported);
+    fn decode_jpeg_thumbnail_empty_data() {
+        let err = decode_jpeg_thumbnail(b"", "decode_thumbnail", Path::new("x")).unwrap_err();
+        assert_eq!(err.kind(), Kind::Corrupt);
     }
 }

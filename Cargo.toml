@@ -2,6 +2,7 @@
 members = [
   "crates/ffi",
   "crates/libraw",
+  "xtask",
 ]
 resolver = "3"
 
@@ -10,19 +11,33 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
+rsb-errors = { git = "https://github.com/rsb/errors-rs", tag = "v0.1.1" }
 rsb-libraw-ffi = { path = "crates/ffi" }
-thiserror = "2"
+snafu = "0.9"
+tracing = "0.1"
 
-# Never crash, engineering/never-crash.md. The default for any new crate.
-# rsb-libraw-ffi, the one crate with `unsafe`, repeats this table without
-# `unsafe_code`; keep the two in step.
+[profile.release]
+# panics.md: a panic unwinds, so a caller can catch it at a boundary, and
+# arithmetic overflow panics instead of wrapping.
+panic = "unwind"
+overflow-checks = true
+
+# The panics.md table, as rsb-errors carries it, plus
+# `let_underscore_must_use`, which errors.md requires. The default for any
+# new crate. rsb-libraw-ffi, the one crate with `unsafe`, repeats this table
+# without `unsafe_code`; keep the two in step.
 [workspace.lints.rust]
 unsafe_code = "forbid"
 unused_must_use = "deny"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
-indexing_slicing = "deny"
+get_unwrap = "deny"
+todo = "deny"
+unimplemented = "deny"
+missing_assert_message = "deny"
+manual_assert = "deny"
+missing_panics_doc = "deny"
+string_slice = "deny"
+exit = "deny"
 let_underscore_must_use = "deny"

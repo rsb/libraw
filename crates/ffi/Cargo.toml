@@ -5,7 +5,9 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-thiserror = { workspace = true }
+rsb-errors = { workspace = true }
+snafu = { workspace = true }
+tracing = { workspace = true }
 
 [build-dependencies]
 bindgen = "0.71"
@@ -22,8 +24,13 @@ unused_must_use = "deny"
 
 [lints.clippy]
 unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
-indexing_slicing = "deny"
+get_unwrap = "deny"
+todo = "deny"
+unimplemented = "deny"
+missing_assert_message = "deny"
+manual_assert = "deny"
+missing_panics_doc = "deny"
+string_slice = "deny"
+exit = "deny"
 let_underscore_must_use = "deny"
 undocumented_unsafe_blocks = "deny"

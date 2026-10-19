@@ -1,5 +1,8 @@
 use std::ffi::{CStr, c_char};
 
+use rsb_errors::Loc;
+use snafu::prelude::*;
+
 use crate::bindings as raw;
 
 /// A LibRaw return code: one variant per `LibRaw_errors` constant in
@@ -56,37 +59,58 @@ impl ErrorCode {
 
 /// Why a `Processor` call failed. Says what happened at the C boundary;
 /// what the caller should do about it is `rsb-libraw`'s decision.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
 pub enum Error {
     /// `libraw_init` returned null: LibRaw could not allocate its state.
-    #[error("libraw_init returned null")]
+    #[snafu(display("libraw_init returned null"))]
     Init,
     /// The path could not be opened for reading, checked before LibRaw sees
     /// it: missing, unreadable, or a bad path. LibRaw's own open reads an
     /// uninitialised size when its `stat` fails, and reports a missing file
     /// as `TooBig` or `IoError` at random.
-    #[error("cannot open file: {0}")]
-    Open(std::io::Error),
+    #[snafu(display("cannot open file{location}: {source}"))]
+    Open {
+        source: std::io::Error,
+        #[snafu(implicit)]
+        location: Loc,
+    },
     /// The path holds a null byte, so C cannot see all of it.
-    #[error("path contains interior null byte")]
+    #[snafu(display("path contains interior null byte"))]
     PathNul,
     /// The path is not UTF-8, which LibRaw needs outside Unix.
     #[cfg(not(unix))]
-    #[error("path is not valid UTF-8")]
+    #[snafu(display("path is not valid UTF-8"))]
     PathNotUtf8,
     /// A LibRaw call returned a code other than success. `message` is
-    /// LibRaw's own text for the code.
-    #[error("{call} failed: {message}")]
+    /// LibRaw's own text for the code; `location` is the line that made
+    /// the call.
+    #[snafu(display("{call} failed{location}: {message}"))]
     Call {
         call: &'static str,
         code: ErrorCode,
         message: String,
+        #[snafu(implicit)]
+        location: Loc,
     },
 }
 
 impl Error {
+    /// The variant's path, dotted. Codes are API: add one, never rename one.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Error::Init => "libraw_ffi.init",
+            Error::Open { .. } => "libraw_ffi.open",
+            Error::PathNul => "libraw_ffi.path_nul",
+            #[cfg(not(unix))]
+            Error::PathNotUtf8 => "libraw_ffi.path_not_utf8",
+            Error::Call { .. } => "libraw_ffi.call",
+        }
+    }
+
     /// The error for LibRaw call `call` returning `rc`, with LibRaw's text
-    /// for the code.
+    /// for the code, located at the caller's line.
+    #[track_caller]
     pub(crate) fn call(call: &'static str, rc: i32) -> Self {
         // SAFETY: libraw_strerror takes any int and returns null or a
         // pointer to a static NUL-terminated string.
@@ -97,6 +121,7 @@ impl Error {
             call,
             code: ErrorCode::from_raw(rc),
             message,
+            location: snafu::GenerateImplicitData::generate(),
         }
     }
 }
@@ -202,7 +227,12 @@ mod tests {
                 ..
             }
         ));
-        assert!(err.to_string().starts_with("libraw_open_file failed: "));
+        let shown = err.to_string();
+        assert!(
+            shown.starts_with("libraw_open_file failed (at crates/ffi/src/error.rs:"),
+            "{shown}"
+        );
+        assert_eq!(err.code(), "libraw_ffi.call");
     }
 
     #[test]

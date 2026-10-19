@@ -1,4 +1,6 @@
-use crate::error::{self as fail};
+use snafu::prelude::*;
+
+use crate::error::{DimensionsSnafu, Error};
 
 // ---------------------------------------------------------------------------
 // Pixel — packed 0x00RRGGBB in a single u32
@@ -19,7 +21,10 @@ pub struct Pixel(u32);
 // Compile-time proof that repr(transparent) produced the expected layout.
 // Guards against future field additions or wrapper changes silently breaking
 // the assumption that &[Pixel] can be reinterpreted as &[u32].
-const _: () = assert!(size_of::<Pixel>() == size_of::<u32>());
+const _: () = assert!(
+    size_of::<Pixel>() == size_of::<u32>(),
+    "Pixel is repr(transparent) over u32, so &[Pixel] reinterprets as &[u32]"
+);
 
 // Methods take `self` by value (not &self) because Pixel is Copy and fits in
 // a register — passing by value avoids an indirection and lets the compiler
@@ -87,20 +92,18 @@ impl ImageBuffer {
     /// Validates that `pixels.len() == width * height` (with overflow-checked
     /// multiplication for 32-bit targets) and constructs the buffer. This is
     /// the sole enforcement point for the length invariant.
-    pub fn new(width: u32, height: u32, pixels: Vec<Pixel>) -> Result<Self, fail::Error> {
+    pub fn new(width: u32, height: u32, pixels: Vec<Pixel>) -> Result<Self, Error> {
         let expected = (width as usize)
             .checked_mul(height as usize)
-            .ok_or_else(|| fail::Error::corrupt("width * height overflows usize"))?;
-        if pixels.len() != expected {
-            return Err(fail::Error::corrupt(format!(
-                "pixel count {} does not match width * height ({}x{} = {})",
-                pixels.len(),
-                width,
-                height,
-                expected,
-            ))
-            .context("ImageBuffer::new failed"));
-        }
+            .context(DimensionsSnafu {
+                what: format!("{width}x{height} overflows usize"),
+            })?;
+        ensure!(
+            pixels.len() == expected,
+            DimensionsSnafu {
+                what: format!("{} pixels for {width}x{height} = {expected}", pixels.len()),
+            }
+        );
         Ok(Self {
             width,
             height,
@@ -138,21 +141,22 @@ impl ImageBuffer {
     /// as produced by JPEG thumbnail decoding) into packed Pixel values.
     /// Expects exactly `width * height * 3` bytes — one byte per channel, three
     /// channels per pixel, for every pixel in the image.
-    pub fn from_rgb8(data: &[u8], width: u32, height: u32) -> Result<Self, fail::Error> {
+    pub fn from_rgb8(data: &[u8], width: u32, height: u32) -> Result<Self, Error> {
         let expected = (width as usize)
             .checked_mul(height as usize)
             .and_then(|n| n.checked_mul(3))
-            .ok_or_else(|| fail::Error::corrupt("RGB8 dimensions overflow usize"))?;
-        if data.len() != expected {
-            return Err(fail::Error::corrupt(format!(
-                "RGB8 data length {} does not match {}x{}x3 = {}",
-                data.len(),
-                width,
-                height,
-                expected,
-            ))
-            .context("ImageBuffer::from_rgb8 failed"));
-        }
+            .context(DimensionsSnafu {
+                what: format!("RGB8 {width}x{height} overflows usize"),
+            })?;
+        ensure!(
+            data.len() == expected,
+            DimensionsSnafu {
+                what: format!(
+                    "RGB8 data is {} bytes, {width}x{height}x3 = {expected}",
+                    data.len()
+                ),
+            }
+        );
 
         // as_chunks::<3>() yields non-overlapping 3-byte arrays and returns any
         // remainder shorter than 3 bytes separately, where it is dropped. The
@@ -174,21 +178,22 @@ impl ImageBuffer {
     /// Converts a flat 16-bit-per-channel RGB buffer (6 bytes per pixel) into
     /// 8-bit packed pixels. Common source: RAW files from high-end cameras and
     /// HDR workflows where each channel has 16 bits of dynamic range.
-    pub fn from_rgb16(data: &[u8], width: u32, height: u32) -> Result<Self, fail::Error> {
+    pub fn from_rgb16(data: &[u8], width: u32, height: u32) -> Result<Self, Error> {
         let expected = (width as usize)
             .checked_mul(height as usize)
             .and_then(|n| n.checked_mul(6))
-            .ok_or_else(|| fail::Error::corrupt("RGB16 dimensions overflow usize"))?;
-        if data.len() != expected {
-            return Err(fail::Error::corrupt(format!(
-                "RGB16 data length {} does not match {}x{}x6 = {}",
-                data.len(),
-                width,
-                height,
-                expected,
-            ))
-            .context("ImageBuffer::from_rgb16 failed"));
-        }
+            .context(DimensionsSnafu {
+                what: format!("RGB16 {width}x{height} overflows usize"),
+            })?;
+        ensure!(
+            data.len() == expected,
+            DimensionsSnafu {
+                what: format!(
+                    "RGB16 data is {} bytes, {width}x{height}x6 = {expected}",
+                    data.len()
+                ),
+            }
+        );
 
         // Each 6-byte chunk is three u16 channels in native byte order (R, G, B).
         // The byte arrangement within each u16 depends on the host: [lo, hi] on
